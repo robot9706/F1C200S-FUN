@@ -85,7 +85,6 @@ int main(void)
             {
                 sdelay(5000);
             }
-            printf("yissss\n");
         }
     }
     return 0;

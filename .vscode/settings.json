@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+        "f1c100s_periph.h": "c",
+        "io.h": "c",
+        "f1c100s_sdc.h": "c"
+    }
+}
