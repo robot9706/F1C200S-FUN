@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "YACC": {
+      "commandName": "Project",
+      "workingDirectory": "C:\\Development\\Projects\\F1C200S-FUN\\src\\bootloader-env\\bootloader-cdc"
+    }
+  }
+}

@@ -65,6 +65,9 @@ build:
         build:
             steps:
                 - name: "Build assembly"
+                  scan:
+                    mode: c-include
+                    resolve: $(INCLUDES)
                   tool: CC
                   args: "-c $(ASFLAGS) $(INCLUDES) ${IN} -o ${OUT}"
                   in:
@@ -72,6 +75,9 @@ build:
                     - "$(PROJECTROOT)/f1c100s/arm926/src/cache-v5.S"
                   out: $(OBJFOLDER)
                 - name: "Build C"
+                  scan:
+                    mode: c-include
+                    resolve: $(INCLUDES)
                   tool: CC
                   args: "-c $(CFLAGS) $(INCLUDES) ${IN} -o ${OUT}"
                   in:
