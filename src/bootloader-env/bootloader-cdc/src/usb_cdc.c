@@ -190,10 +190,10 @@ static uint8_t deviceConfiguration;
 
 static CDC_LINECODING lineCoding = {0};
 
-#define BUFFERS_SIZE 128
+#define BUFFERS_SIZE 512
 
 static uint8_t rxBufferData[BUFFERS_SIZE] = {0};
-static uint8_t txBufferData[BUFFERS_SIZE] = {1};
+static uint8_t txBufferData[BUFFERS_SIZE] = {0};
 
 static RINGBUFFER rxBuffer = {
     0,
@@ -321,7 +321,14 @@ static void handle_ep0()
 
     if (csr & 1) // Received packet ready
     {
-        if (USB->RXCOUNT != 8)
+        if (USB->RXCOUNT == 0)
+        {
+            printf("Zero length EP0\n");
+            USB->TXCSR = 0x40; // Serviced RxPktRdy
+            return;
+        }
+
+        if (USB->RXCOUNT > 8 || USB->RXCOUNT < 4)
         {
             printf("Invalid EP0 packet length %d! HALT\n", USB->RXCOUNT);
 
