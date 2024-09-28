@@ -8,6 +8,7 @@
 #include "f1c100s_uart.h"
 #include "f1c100s_gpio.h"
 #include "f1c100s_clock.h"
+#include "f1c100s_intc.h"
 #include "usb_cdc.h"
 
 #define RAM_BASE 0x80000000
@@ -58,14 +59,18 @@ int main(void)
                     if (length == 0)
                     {
                         // No more data - ready to boot
+                        cdc_deinit();
 
-                        printf("Doing the thing :)\n");
+                        arm32_interrupt_disable(); // Disable IRQs so nothing is going to stop us
+
+                        // Set the INTC Vector base address to the new table which should be the first thing in the new code
+                        intc_set_irq_base(LOAD_ADDR);
+
+                        printf("Jump\n");
                         while (!(uart_get_status(UART1) & UART_LSR_THRE)); // Wait for TX fifo empty
 
                         void (*bootFunc)(void) = (void (*)())LOAD_ADDR;
                         bootFunc();
-
-                        printf("HALT");
 
                         while (1)
                             ;

@@ -22,8 +22,8 @@ static void writeLine(const char* str)
 
 int main(void)
 {
-    //system_init();            // Initialize clocks, mmu, cache, uart, ...
-    //arm32_interrupt_enable(); // Enable interrupts
+    system_init();
+    arm32_interrupt_enable(); // Enable interrupts
 
     writeLine("Hello world :)");
 

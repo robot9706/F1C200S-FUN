@@ -1,0 +1,14 @@
+{
+    "files.associations": {
+        "f1c100s_uart.h": "c",
+        "f1c100s_clock.h": "c",
+        "f1c100s_pwm.h": "c",
+        "stddef.h": "c",
+        "stdbool.h": "c",
+        "f1c100s_gpio.h": "c",
+        "stdlib.h": "c",
+        "system.h": "c",
+        "display.h": "c",
+        "f1c100s_de.h": "c"
+    }
+}

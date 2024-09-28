@@ -1,0 +1,6 @@
+{
+    "files.associations": {
+        "f1c100s_uart.h": "c",
+        "f1c100s_clock.h": "c"
+    }
+}

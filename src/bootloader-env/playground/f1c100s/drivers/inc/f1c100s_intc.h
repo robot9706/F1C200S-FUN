@@ -82,8 +82,6 @@ void intc_set_priority(intc_irq_vector_e irq, uint8_t prio);
 
 void intc_set_irq_handler(intc_irq_vector_e irq, intc_irq_handler handler);
 
-void intc_set_irq_base(uint32_t vectorBaseAddress);
-
 #ifdef __cplusplus
 }
 #endif

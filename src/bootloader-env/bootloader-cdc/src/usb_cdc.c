@@ -475,6 +475,14 @@ static void handle_ep0()
             USB->EP_IDX = 0;
             USB->TXCSR = 0x48; // Serviced RxPktRdy | DataEnd
         }
+        /*else if (setup.bmRequestType == 0x02 && setup.bRequest == 0x01) // Something sent to the IRQ EP
+        {
+            //USB->EP_IDX = 0;
+            //USB->TXCSR = 0x40; // Serviced RxPktRdy
+
+            printf("wValue %02x %02x wIndex %02x %02x wLength %02x %02x\n",
+            setup.wValue_l, setup.wValue_h, setup.wIndex_l, setup.wIndex_h, setup.wLength_l, setup.wLength_h);
+        }*/
         else
         {
             printf("%02x %02x %02x %02x %02x %02x %02x %02x\n", setup.bmRequestType, setup.bRequest,
