@@ -11,17 +11,12 @@
 
 static void sys_clk_init(void);
 static void sys_uart_init(void);
-static void sys_mmu_cache_init(void);
-
-// MMU translation table
-uint32_t mmu_l1_tbl[4096] __attribute__((section(".mmu_tbl")));
 
 void system_init(void)
 {
-    //sys_clk_init();
+    sys_clk_init();
     sys_uart_init();
-    //sys_mmu_cache_init();
-    //intc_init();
+    intc_init();
 }
 
 static void sys_clk_init(void)
@@ -32,13 +27,13 @@ static void sys_clk_init(void)
 
     clk_pll_init(PLL_PERIPH, 25, 1); // PLL_PERIPH = 24M*25/1 = 600M
     clk_pll_enable(PLL_PERIPH);
-    while (!clk_pll_is_locked(PLL_PERIPH))
+    while(!clk_pll_is_locked(PLL_PERIPH))
         ; // Wait for PLL to lock
 
     // Configure bus clocks
-    clk_hclk_config(1);                                  // HCLK = CLK_CPU
+    clk_hclk_config(1); // HCLK = CLK_CPU
     clk_ahb_config(CLK_AHB_SRC_PLL_PERIPH_PREDIV, 3, 1); // AHB = PLL_PERIPH/3/1 = 200M
-    clk_apb_config(CLK_APB_DIV_2);                       // APB = AHB/2 = 100M
+    clk_apb_config(CLK_APB_DIV_2); // APB = AHB/2 = 100M
     sdelay(10);
 
     // Configure video clocks
@@ -48,7 +43,7 @@ static void sys_clk_init(void)
     // Configure CPU PLL
     clk_pll_init(PLL_CPU, 30, 1); // PLL_CPU = 24M*30/1 = 720M
     clk_pll_enable(PLL_CPU);
-    while (!clk_pll_is_locked(PLL_CPU))
+    while(!clk_pll_is_locked(PLL_CPU))
         ; // Wait for PLL to lock
 
     // Select PLL as CPU clock source
@@ -63,23 +58,6 @@ static void sys_uart_init(void)
     clk_enable(CCU_BUS_CLK_GATE2, 21);                                  // Open the clock gate for uart1
     clk_reset_clear(CCU_BUS_SOFT_RST2, 21);                             // Deassert uart1 reset
     uart_init(UART1, 115200);                                           // Configure UART1 to 115200-8-n-1
-}
-
-static void sys_mmu_cache_init(void)
-{
-    // Initialize translation table
-    mmu_map_l1_entry(mmu_l1_tbl, 0x00000000, 0x00000000, SZ_2G, SECTION_NCNB);
-    mmu_map_l1_entry(mmu_l1_tbl, 0x80000000, 0x80000000, SZ_2G, SECTION_NCNB);
-
-    // Enable caching for first 32MB of DRAM
-    mmu_map_l1_entry(mmu_l1_tbl, 0x80000000, 0x80000000, SZ_1M * 32, SECTION_CB);
-
-    arm32_ttb_set((uint32_t)(mmu_l1_tbl));
-    arm32_tlb_invalidate();
-    arm32_domain_set(0x3); // Domain access - manager
-    arm32_mmu_enable();
-    arm32_icache_enable();
-    arm32_dcache_enable();
 }
 
 void sdelay(int loops)

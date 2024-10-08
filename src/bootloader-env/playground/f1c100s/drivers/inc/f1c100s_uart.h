@@ -92,6 +92,10 @@ uart_int_id_e uart_get_int_id(uint32_t uart);
 
 uint8_t uart_get_status(uint32_t uart);
 
+uint8_t uart_get_tx_fifo_level(uint32_t uart);
+
+uint8_t uart_get_rx_fifo_level(uint32_t uart);
+
 #ifdef __cplusplus
 }
 #endif

@@ -9,6 +9,7 @@
         "stdlib.h": "c",
         "system.h": "c",
         "display.h": "c",
-        "f1c100s_de.h": "c"
+        "f1c100s_de.h": "c",
+        "f1c100s_tvd.h": "c"
     }
 }

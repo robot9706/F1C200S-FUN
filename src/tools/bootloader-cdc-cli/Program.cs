@@ -21,31 +21,52 @@ namespace CLI
             public List<string> Params = new List<string>();
         }
 
-        static void Main(string[] args)
+        class Args
+        {
+            public bool Loop;
+
+            public List<LoaderAction> Actions;
+        }
+
+        static void Main(string[] strArgs)
         {
             try
             {
-                var actions = ParseArguments(args);
+                var args = ParseArguments(strArgs);
 
-                if (actions.Count == 0)
+                if (args.Actions.Count == 0)
                 {
                     throw new Exception("No actions provided");
                 }
 
-                foreach (var action in actions)
+                while (args.Loop)
                 {
-                    switch (action.Action)
+                    foreach (var action in args.Actions)
                     {
-                        case ActionEnum.UBootFatLoad:
-                            ExecuteUBootFatLoad(action.Params);
+                        switch (action.Action)
+                        {
+                            case ActionEnum.UBootFatLoad:
+                                ExecuteUBootFatLoad(action.Params);
+                                break;
+                            case ActionEnum.LoadCDC:
+                                ExecuteCDCLoad(action.Params);
+                                break;
+                        }
+                    }
+
+                    Console.WriteLine("Done");
+
+                    if (args.Loop)
+                    {
+                        Console.WriteLine("Press ENTER to restart");
+
+                        var key = Console.ReadKey();
+                        if (key.Key != ConsoleKey.Enter)
+                        {
                             break;
-                        case ActionEnum.LoadCDC:
-                            ExecuteCDCLoad(action.Params);
-                            break;
+                        }
                     }
                 }
-
-                Console.WriteLine("Done");
             }
             catch (Exception ex)
             {
@@ -57,11 +78,13 @@ namespace CLI
             }
         }
 
-        private static List<LoaderAction> ParseArguments(string[] args)
+        private static Args ParseArguments(string[] args)
         {
+            var ret = new Args();
+
             Array.Reverse(args);
             Stack<string> argsStack = new Stack<string>(args);
-            List<LoaderAction> actions = new List<LoaderAction>();
+            ret.Actions = new List<LoaderAction>();
 
             LoaderAction currentAction = null;
             while (argsStack.Count > 0)
@@ -72,16 +95,22 @@ namespace CLI
                 {
                     if (currentAction != null)
                     {
-                        actions.Add(currentAction);
+                        ret.Actions.Add(currentAction);
+                        currentAction = null;
                     }
 
-                    currentAction = new LoaderAction();
                     switch (currentArg.Substring(2))
                     {
+                        case "loop":
+                            ret.Loop = true;
+                            break;
+
                         case "uboot-fatload":
+                            currentAction = new LoaderAction();
                             currentAction.Action = ActionEnum.UBootFatLoad;
                             break;
                         case "cdc":
+                            currentAction = new LoaderAction();
                             currentAction.Action = ActionEnum.LoadCDC;
                             break;
                         default:
@@ -100,10 +129,10 @@ namespace CLI
 
             if (currentAction != null)
             {
-                actions.Add(currentAction);
+                ret.Actions.Add(currentAction);
             }
 
-            return actions;
+            return ret;
         }
 
         private static SerialPort WaitForPort(string portName, int baud, int timeoutMs)
