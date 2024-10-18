@@ -1,4 +1,5 @@
-﻿using System.IO.Ports;
+﻿using System.Diagnostics;
+using System.IO.Ports;
 using System.Threading;
 
 namespace CLI
@@ -250,29 +251,34 @@ namespace CLI
 
             Console.Write("[CDC] Transfering file");
 
+            var sw = Stopwatch.StartNew();
+
             long tx = 0;
             using (FileStream inputFile = new FileStream(file, FileMode.Open))
             {
-                byte[] buffer = new byte[32];
+                byte[] buffer = new byte[17];
 
                 while (inputFile.Position < inputFile.Length)
                 {
-                    int readCount = inputFile.Read(buffer, 0, buffer.Length);
+                    int readCount = inputFile.Read(buffer, 1, buffer.Length - 1);
 
                     // Write data packet
-                    port.Write(new byte[] { (byte)readCount }, 0, 1);
-                    port.Write(buffer, 0, readCount);
+                    buffer[0] = (byte)readCount;
+                    port.Write(buffer, 0, readCount + 1);
 
                     port.BaseStream.Flush();
 
                     Console.Write(".");
+                    // Thread.Sleep(10);
                 }
 
                 tx = inputFile.Length;
             }
 
+            sw.Stop();
+
             Console.WriteLine();
-            Console.WriteLine($"[CDC] Sent {tx} bytes");
+            Console.WriteLine($"[CDC] Sent {tx} bytes in {sw.ElapsedMilliseconds}ms");
 
             // Done
             //Console.WriteLine("[CDC] Press enter to boot");

@@ -9,8 +9,8 @@ STACK_FIQ_SIZE = 0x1000;
 STACK_SVC_SIZE = 0x4000;
 
 MMU_TTB_SIZE = 16K;
-DRAM_START = 0x80020000; /* 128k for the bootloader */
-DRAM_SIZE = (1M);
+DRAM_START = 0x80000000;
+DRAM_SIZE = 0x20000; /* 128k for the bootloader */
 
 MEMORY
 {

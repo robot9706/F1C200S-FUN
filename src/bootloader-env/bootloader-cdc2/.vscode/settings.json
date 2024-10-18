@@ -1,0 +1,9 @@
+{
+    "files.associations": {
+        "f1c100s_clock.h": "c",
+        "usb.h": "c",
+        "io.h": "c",
+        "stdint.h": "c",
+        "armv5_cache.h": "c"
+    }
+}

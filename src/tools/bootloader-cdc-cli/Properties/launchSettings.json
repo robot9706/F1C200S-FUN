@@ -2,7 +2,7 @@
   "profiles": {
     "CLI": {
       "commandName": "Project",
-      "commandLineArgs": "--loop --uboot-fatload COM23 mmc 0:1 loader-cdc.bin --cdc COM22 C:\\Development\\Projects\\F1C200S-FUN\\src\\bootloader-env\\playground\\build\\playground.bin"
+      "commandLineArgs": "--loop --uboot-fatload COM23 mmc 0:1 loader-cdc2.bin --cdc COM22 C:\\Development\\Projects\\F1C200S-FUN\\src\\bootloader-env\\playground\\build\\playground.bin"
     }
   }
 }
