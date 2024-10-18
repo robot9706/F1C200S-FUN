@@ -256,7 +256,7 @@ namespace CLI
             long tx = 0;
             using (FileStream inputFile = new FileStream(file, FileMode.Open))
             {
-                byte[] buffer = new byte[17];
+                byte[] buffer = new byte[64];
 
                 while (inputFile.Position < inputFile.Length)
                 {
@@ -278,7 +278,7 @@ namespace CLI
             sw.Stop();
 
             Console.WriteLine();
-            Console.WriteLine($"[CDC] Sent {tx} bytes in {sw.ElapsedMilliseconds}ms");
+            Console.WriteLine($"[CDC] Sent {tx} bytes in {sw.ElapsedMilliseconds}ms ({(tx / sw.ElapsedMilliseconds) * 1000} bit/s)");
 
             // Done
             //Console.WriteLine("[CDC] Press enter to boot");

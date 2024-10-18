@@ -13,6 +13,24 @@
 #include "usb_cdc.h"
 #include "dma.h"
 
+// 0 - no debug logs = go fast
+// 1 - lots of debug logs = slow
+#define DEBUG 0
+
+// Bootloader load stuff
+#define RAM_BASE 0x80000000
+#define BL1_SIZE 0x20000
+#define LOAD_ADDR (RAM_BASE + BL1_SIZE)
+
+static uint32_t loadAddress = LOAD_ADDR;
+
+#define EP3STATE_WAIT_COMMAND 0
+#define EP3STATE_WAIT_DATA 1
+#define EP3STATE_WAIT_DMA 2
+static uint32_t ep3State = EP3STATE_WAIT_COMMAND;
+static uint32_t ep3DataLength = 0;
+
+// USB descriptors
 static DSC_DEV deviceDescriptor = {
     sizeof(DSC_DEV), // bLength
     1,               // bDescriptorType = device
@@ -173,7 +191,8 @@ static struct
         2,              // bmAttributes:        Bulk
         64,             // wMaxPacketSize
         0               // bInterval
-    }};
+    }
+};
 
 static DSC_LNID languageDescriptor = {
     sizeof(DSC_LNID), // bLength
@@ -191,23 +210,15 @@ static uint8_t *stringDescriptors[NUM_STRINGS] = {
     serialString,
 };
 
-#define DEBUG 0
+// USB EP0 state
+#define EP0STATE_CONTROL_PACKET 0
+#define EP0STATE_CDC_LINESTATE 1
+static uint8_t ep0State = EP0STATE_CONTROL_PACKET;
 
-#define EP0_BUFFER_LEN 32
-static uint8_t ep0Buffer[EP0_BUFFER_LEN] = {0}; // Buffer to hold EP0 data packets
-static int ep0BufferPointer = 0;
-
+// CDC config
 static CDC_LINECODING lineCoding = {0};
 
-#define RAM_BASE 0x80000000
-#define BL1_SIZE 0x20000
-
-#define LOAD_ADDR (RAM_BASE + BL1_SIZE)
-
-static uint32_t loadAddress = LOAD_ADDR;
-
-static int dmaTransfer = 0;
-
+// Start the uploaded code
 static void execute()
 {
     arm32_interrupt_disable(); // Disable IRQs so nothing is going to stop us
@@ -222,13 +233,13 @@ static void execute()
     void (*bootFunc)(void) = (void (*)())LOAD_ADDR;
     bootFunc();
 
-    while (1);
-
     // How
     printStr("Interesting :>\n");
+
+    while (1);
 }
 
-// Writes data to the USB physical layer
+// Writes data to the USB physical layer controller
 static void usb_phy_write(uint8_t addr, uint8_t data, uint8_t len)
 {
     for (uint32_t i = 0; i < len; i++)
@@ -283,8 +294,8 @@ static void ep0_send_str(void *ptr, uint16_t descLength)
 static void usb_init()
 {
     // Enable DMA
-    //clk_enable(CCU_BUS_CLK_GATE0, 6);
-    //clk_reset_clear(CCU_BUS_SOFT_RST0, 6);
+    clk_enable(CCU_BUS_CLK_GATE0, 6);
+    clk_reset_clear(CCU_BUS_SOFT_RST0, 6);
     //DMA->INT_PRIO = DMA->INT_PRIO | (1 << 16); // Auto clock gating
 
     // Enable USB clock
@@ -320,23 +331,27 @@ void usb_deinit()
     clk_reset_set(CCU_BUS_SOFT_RST0, 24); // Assert USB OTG Reset
 }
 
-static void usb_handle_ep0_packet()
+static void usb_handle_ep0_control_packet()
 {
-    if (ep0BufferPointer < 8)
+    uint32_t receiveDataCount = USB->RXCOUNT;
+    if (receiveDataCount == 0) // ZLP - Zero length packet ACK, NACK etc
     {
-        printStr("EP0 BUFF LEN INVALID ");
-        printDec8(ep0BufferPointer);
+        USB->TXCSR = 0x48; // Serviced RxPktRdy | DataEnd
+        return;
+    }
+
+    if (receiveDataCount != 8)
+    {
+        printStr("EP0 Control packet invalid length ");
+        printDec8(receiveDataCount);
         printChar('\n');
-        return; // Not enough data yet
+        return; // Not enough data
     }
 
     // Copy data from buffer to the packet structure
     SETUP_PACKET setup;
-    memcpy(&setup.dat, &ep0Buffer, 8);
-
-    // Remove data from buffer
-    memcpy(&ep0Buffer[0], &ep0Buffer[8], EP0_BUFFER_LEN - 8);
-    ep0BufferPointer -= 8;
+    setup.dat[0] = USB->FIFO[0].word32;
+    setup.dat[1] = USB->FIFO[0].word32;
 
     // Check packet
 #if DEBUG
@@ -475,38 +490,9 @@ static void usb_handle_ep0_packet()
         printStr("\tCDC SET_LINE_CODING\n");
 
         // Get next packet for data - secion 21.1.2
-        USB->TXCSR = 0x40; // Set ServicedRxPktRdy
-            
-        while ((USB->EP_IS & 1) == 0); // Wait for another EP0 RIQ
-        while ((USB->TXCSR & 1) == 0); // Wait for the RxPktRdy flag
+        ep0State = EP0STATE_CDC_LINESTATE;
 
-        // Now the FIFO has the next packet
-        uint16_t count0 = USB->RXCOUNT;
-        if (count0 != 7)
-        {
-            printStr("\tUnexpected line coding size\n");
-        }
-        else
-        {
-            // Read the data into the CDC_LINECODING struct
-            for (int x = 0; x < 7; x++)
-            {
-                lineCoding.data[x] = USB->FIFO[0].byte;
-            }
-        }
-
-        printStr("Baud=");
-        printDec16(lineCoding.dwDTERate);
-        printStr(", stopBits=");
-        printDec16(lineCoding.bCharFormat);
-        printStr(", partiy=");
-        printDec16(lineCoding.bParityType);
-        printStr(", bits=");
-        printDec16(lineCoding.bDataBits);
-        printChar('\n');
-
-        USB->EP_IDX = 0;
-        USB->TXCSR = 0x48; // Serviced RxPktRdy | DataEnd
+        USB->TXCSR = 0x40; // Serviced RxPktRdy
     }
     else if (setup.bmRequestType == 0x21 && setup.bRequest == 0x22) // CDC: SET_CONTROL_LINE_STATE
     {
@@ -547,6 +533,40 @@ static void usb_handle_ep0_packet()
     }
 }
 
+static void usb_handle_ep0_cdc_line_state()
+{
+    uint32_t receiveDataCount = USB->RXCOUNT;
+
+    ep0State = EP0STATE_CONTROL_PACKET;
+
+    if (receiveDataCount != 7)
+    {
+        printStr("EP0 Unexpected line coding size ");
+        printDec8(receiveDataCount);
+        printChar('\n');
+        return;
+    }
+
+    // Read the data into the CDC_LINECODING struct
+    for (int x = 0; x < 7; x++)
+    {
+        lineCoding.data[x] = USB->FIFO[0].byte;
+    }
+
+    printStr("Baud=");
+    printDec16(lineCoding.dwDTERate);
+    printStr(", stopBits=");
+    printDec16(lineCoding.bCharFormat);
+    printStr(", partiy=");
+    printDec16(lineCoding.bParityType);
+    printStr(", bits=");
+    printDec16(lineCoding.bDataBits);
+    printChar('\n');
+
+    USB->EP_IDX = 0;
+    USB->TXCSR = 0x48; // Serviced RxPktRdy | DataEnd
+}
+
 static void usb_handle_ep0()
 {
     USB->EP_IDX = 0; // Select endpoint 0
@@ -561,45 +581,38 @@ static void usb_handle_ep0()
 
     if (csr & 1) // RxPktRdy
     {
-        uint32_t receiveDataCount = USB->RXCOUNT;
-
-        // Make sure there's room in the buffer
-        if (ep0BufferPointer + receiveDataCount >= EP0_BUFFER_LEN)
+        switch (ep0State)
         {
-            printStr("EP0 buffer overflow! HALT");
-
-            while (1);
+            case EP0STATE_CONTROL_PACKET:
+                usb_handle_ep0_control_packet();
+                break;
+            case EP0STATE_CDC_LINESTATE:
+                usb_handle_ep0_cdc_line_state();
+                break;
         }
-
-        // Read data from EP
-        for (int read = 0; read < receiveDataCount; read++)
-        {
-            ep0Buffer[ep0BufferPointer + read] = USB->FIFO[0].byte;
-        }
-        ep0BufferPointer += receiveDataCount;
-
-        printStr("EP0 received ");
-        printDec8(ep0BufferPointer);
-        printChar('\n');
-
-        usb_handle_ep0_packet();
     }
 
     if (csr & 4) // SentStall
     {
+#if DEBUG
         printStr("STALL\n");
+#endif
 
         USB->TXCSR = USB->TXCSR & ~(1 << 3); // Clear SentStall
     }
 
     if (csr & 8) // DataEnd
     {
+#if DEBUG
         printStr("DataEnd\n");
+#endif
     }
 
     if (csr & 16) // Setup end
     {
+#if DEBUG
         printStr("SetupEnd\n");
+#endif
 
         USB->TXCSR = 0x80; // EP0 Serviced Setup End
     }
@@ -611,14 +624,6 @@ static void handle_ep3_in()
 #if DEBUG
     printStr("EP3 IN\n");
 #endif
-
-    if (dmaTransfer)
-    {
-#if DEBUG
-        printStr("DMA not ready\n");
-#endif
-        return;
-    }
 
     uint8_t epAddr = configDescriptor.dataOutEndpoint.bEndpointAddress & 0x0F;
     USB->EP_IDX = epAddr;
@@ -633,74 +638,111 @@ static void handle_ep3_in()
 
     if ((csr & 1) == 0) // RxPktRdy ?
     {
-        printStr("\tData not ready\n");
+        printStr("EP3 Data not ready\n");
         USB->EP_IDX = 0;
         return;
     }
 
-    uint16_t recBytes = USB->RXCOUNT;
+    uint16_t ep3Bytes = USB->RXCOUNT;
 
-    uint8_t command = USB->FIFO[epAddr].byte;
+    switch (ep3State)
+    {
+        case EP3STATE_WAIT_COMMAND:
+            // Pop the command byte from the FIFO
+            uint8_t command = USB->FIFO[epAddr].byte;
 
 #if DEBUG
-    printStr("CMD ");
-    printDec8(command);
-    printChar(' ');
-    printDec8(recBytes);
-    printChar('\n');
+            printStr("EP3 command 0x");
+            print8(command);
+            printChar(' ');
+            printDec8(ep3Bytes);
+            printChar('\n');
 #endif
 
-    if (command == 0) // Done uploading, GO
-    {
-        printStr("DONE!\n");
+            if (command == 0) // Done uploading, GO
+            {
+                printStr("DONE!\n");
 
-        usb_deinit();
+                usb_deinit();
 
-        execute();
-    }
-    else
-    {
-        uint8_t numBytes = command;
+                execute();
+            }
 
-        clk_enable(CCU_BUS_CLK_GATE0, 6);
-        clk_reset_clear(CCU_BUS_SOFT_RST0, 6);
-
-        NDMA_T* dma = NDMA(0);
-        dma->SRC = (uint32_t)USB_BASE + 0x0C;
-        dma->DST = loadAddress;
-        dma->BYTE_COUNTER = numBytes;
-        dma->CFG = (0x11 | (1 << 5) | (0x11 << 16) | (1 << 31));
-
-        while (dma->CFG & (1 << 31))
-        {
-            // Wait until load clears
-        }
+            ep3DataLength = command;
+            ep3State = EP3STATE_WAIT_DATA;
 
 #if DEBUG
-        printStr("DMA xfer 0x");
-        print32(loadAddress);
+            printStr("EP3 data len ");
+            printDec8(ep3DataLength);
+            printChar('\n');
+#endif
+            ep3Bytes = USB->RXCOUNT;
+
+#if DEBUG
+        printStr("Check FIFO ");
+        printDec8(ep3Bytes);
         printChar('\n');
 #endif
 
-        loadAddress += numBytes;
-        dmaTransfer = 1;
+            if (ep3Bytes < ep3DataLength) // If we already have the data, keep going
+            {
+                break;
+            }
+        case EP3STATE_WAIT_DATA:
+            if (ep3Bytes < ep3DataLength)
+            {
+                // Still waiting for data
+                printStr("WAIT ");
+                printDec8(ep3DataLength);
+                printChar(' ');
+                printDec8(ep3Bytes);
+                printChar('\n');
+                return;
+            }
+
+            // Got data, start DMA
+            NDMA_T* dma = NDMA(0);
+            dma->SRC = (uint32_t)USB_BASE + 0x0C;
+            dma->DST = loadAddress;
+            dma->BYTE_COUNTER = ep3DataLength;
+            dma->CFG = (0x11 | (1 << 5) | (0x11 << 16) | (1 << 31));
+
+            while (dma->CFG & (1 << 31))
+            {
+                // Wait until load clears
+            }
+
+#if DEBUG
+            printStr("DMA start 0x");
+            print32(loadAddress);
+            printChar('\n');
+#endif
+
+            loadAddress += ep3DataLength;
+            ep3State = EP3STATE_WAIT_DMA;
+            break;
     }
 
-    USB->RXCSR &= ~1; // Clear the RxPktRdy
     USB->EP_IDX = 0; // Reset the EP index pointer just to be sure
 }
 
 static void usb_handler()
 {
     // Handle DMA status
-    if (dmaTransfer)
+    if (ep3State == EP3STATE_WAIT_DMA)
     {
         NDMA_T* dma = NDMA(0);
         if (!(dma->CFG & (1 << 30)))
         {
-            dmaTransfer = 0;
+            // Clear the RxPktRdy
+            USB->EP_IDX = configDescriptor.dataOutEndpoint.bEndpointAddress & 0x0F;
+            USB->RXCSR &= ~1;
+            USB->EP_IDX = 0;
+
+            ep3DataLength = 0;
+            ep3State = EP3STATE_WAIT_COMMAND;
 #if DEBUG
-            printStr("DMA xfer done\n");
+            printStr("EP3 DMA done\n");
 #endif
         }
     }

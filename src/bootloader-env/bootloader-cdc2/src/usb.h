@@ -65,7 +65,7 @@ typedef struct
 
 typedef union PACKED
 {
-    uint8_t dat[8];
+    uint32_t dat[2];
     struct
     {
         uint8_t bmRequestType;
