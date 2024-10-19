@@ -428,81 +428,76 @@ static void setup_uart2()
 #define JOY_SYNC_NONE 0
 #define JOY_SYNC_SYNC1 1
 #define JOY_SYNC_SYNC2 2
-#define JOY_SYNC_SYNC_OK 3
 static int joySync = JOY_SYNC_NONE;
-static int joySyncBytes = 0;
+
+static void process_controller_input()
+{
+    union controllerData
+    {
+        uint8_t raw[6];
+        struct
+        {
+            uint8_t leftStickX;
+            uint8_t leftStickY;
+            uint8_t rightStickX;
+            uint8_t rightStickY;
+            uint16_t buttons;
+        } data;
+    } state;
+
+    for (int x = 0; x < 6; x++)
+    {
+        state.raw[x] = uart_get_rx(UART0);
+    }
+
+    printInt16(state.data.leftStickX);
+    uart_tx(UART1, ' ');
+    printInt16(state.data.leftStickY);
+    uart_tx(UART1, ' ');
+    printInt16(state.data.rightStickX);
+    uart_tx(UART1, ' ');
+    printInt16(state.data.rightStickY);
+    uart_tx(UART1, ' ');
+    writeHex32(state.data.buttons);
+
+    uart_tx(UART1, '\n');
+}
 
 static void joy_update()
 {
-    if (joySync == JOY_SYNC_SYNC_OK)
+    while (uart_get_rx_fifo_level(UART0) > 0)
     {
-        if (uart_get_rx_fifo_level(UART0) >= 8)
+        switch (joySync)
         {
-            union controllerData
-            {
-                uint8_t raw[8];
-                struct
+            case JOY_SYNC_NONE:
+                uint8_t sync1 = uart_get_rx(UART0);
+                if (sync1 == 0x55)
                 {
-                    uint8_t sync1;
-                    uint8_t sync2;
+                    joySync = JOY_SYNC_SYNC1;
+                }
+                break;
+            case JOY_SYNC_SYNC1:
+                uint8_t sync2 = uart_get_rx(UART0);
+                if (sync2 == 0xAA)
+                {
+                    joySync = JOY_SYNC_SYNC2;
+                }
+                else
+                {
+                    joySync = JOY_SYNC_NONE;
+                    return;
+                }
+                break;
+            case JOY_SYNC_SYNC2:
+                if (uart_get_rx_fifo_level(UART0) < 6)
+                {
+                    return;
+                }
 
-                    uint8_t leftStickX;
-                    uint8_t leftStickY;
-                    uint8_t rightStickX;
-                    uint8_t rightStickY;
-                    uint16_t buttons;
-                } data;
-            } state;
+                process_controller_input();
 
-            for (int x = 0; x < 8; x++)
-            {
-                state.raw[x] = uart_get_rx(UART0);
-
-                //writeHex8(state.raw[x]);
-                //uart_tx(UART1, ' ');
-            }
-            //uart_tx(UART1, '\n');
-
-            if (state.data.sync1 != 0x55 || state.data.sync2 != 0xAA)
-            {
                 joySync = JOY_SYNC_NONE;
-                writeUart("SYNC off\n");
-            }
-            else
-            {
-                printInt16(state.data.leftStickX);
-                uart_tx(UART1, ' ');
-                printInt16(state.data.leftStickY);
-                uart_tx(UART1, ' ');
-                printInt16(state.data.rightStickX);
-                uart_tx(UART1, ' ');
-                printInt16(state.data.rightStickY);
-                uart_tx(UART1, ' ');
-                writeHex32(state.data.buttons);
-
-                uart_tx(UART1, '\n');
-            }
-        }
-    }
-    else if (uart_get_rx_fifo_level(UART0) > 0)
-    {
-        uint8_t sync = uart_get_rx(UART0);
-        if (joySync == JOY_SYNC_NONE && sync == 0x55)
-        {
-            joySync = JOY_SYNC_SYNC1;
-            writeUart('SYNC1\n');
-        }
-        else if (joySync == JOY_SYNC_SYNC1 && sync == 0xAA)
-        {
-            joySync = JOY_SYNC_SYNC2;
-            joySyncBytes = 6;
-
-            writeUart('SYNC2\n');
-        }
-        else if ((joySyncBytes -= 1) <= 0)
-        {
-            joySync = JOY_SYNC_SYNC_OK;
-            writeUart('SYNC OK\n');
+                return;
         }
     }
 }
