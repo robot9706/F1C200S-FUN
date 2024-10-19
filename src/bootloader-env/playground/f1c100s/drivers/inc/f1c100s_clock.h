@@ -19,7 +19,7 @@ typedef enum {
 
     CCU_BUS_CLK_GATE0 = 0x060,
     CCU_BUS_CLK_GATE1 = 0x064,
-    CCU_BUS_CLK_GATE2 = 0x068,
+    CCU_BUS_CLK_GATE2 = 0x068, // 3.2.5.11
 
     CCU_SDMMC0_CLK      = 0x088,
     CCU_SDMMC1_CLK      = 0x08c,
