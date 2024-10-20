@@ -32,6 +32,11 @@ int recty = 0;
 int rectDirX = 1;
 int rectDirY = 1;
 
+float rect2x = 0;
+float rect2y = 0;
+int rect2Color = 0;
+int rect2ChangeColor = 0;
+
 #define RGB565(R, G, B) ((R << 11) | (G << 5) | B)
 
 int rectColor = 0;
@@ -422,13 +427,19 @@ static void setup_uart2()
     clk_reset_clear(CCU_BUS_SOFT_RST2, 20);
     uart_init(UART0, 57600);
 
-    uart_tx(UART0, '!');
+    // uart_tx(UART0, '!');
 }
 
 #define JOY_SYNC_NONE 0
 #define JOY_SYNC_SYNC1 1
 #define JOY_SYNC_SYNC2 2
 static int joySync = JOY_SYNC_NONE;
+
+static uint8_t leftStickX = 127;
+static uint8_t leftStickY = 127;
+static uint8_t rightStickX = 127;
+static uint8_t rightStickY = 127;
+static uint16_t buttons = 0;
 
 static void process_controller_input()
 {
@@ -459,8 +470,13 @@ static void process_controller_input()
     printInt16(state.data.rightStickY);
     uart_tx(UART1, ' ');
     writeHex32(state.data.buttons);
-
     uart_tx(UART1, '\n');
+
+    leftStickX = state.data.leftStickX;
+    leftStickY = state.data.leftStickY;
+    rightStickX = state.data.rightStickX;
+    rightStickY = state.data.rightStickY;
+    buttons = state.data.buttons;
 }
 
 static void joy_update()
@@ -583,6 +599,54 @@ int main(void)
         {
             lastMoveTime = systime;
 
+            // Move controller rect
+            if (buttons & 0x800 && !rect2ChangeColor)
+            {
+                rect2ChangeColor = 1;
+                rect2Color = (rect2Color + 1) % 6;
+            }
+            else if (!(buttons & 0x800) && rect2ChangeColor)
+            {
+                rect2ChangeColor = 0;
+            }
+
+            if (leftStickX < 120)
+            {
+                rect2x -= ((120 - (float)leftStickX) / 120) * 5;
+            }
+            else if (leftStickX > 134)
+            {
+                rect2x += (((float)leftStickX - 134) / (255 - 134)) * 5;
+            }
+
+            if (rect2x < 0)
+            {
+                rect2x = 0;
+            }
+            else if (rect2x + RECT_SIZE >= DISPLAY_WIDTH)
+            {
+                rect2x = DISPLAY_WIDTH - RECT_SIZE;
+            }
+
+            if (leftStickY < 120)
+            {
+                rect2y += ((120 - (float)leftStickY) / 120) * 5;
+            }
+            else if (leftStickY > 134)
+            {
+                rect2y -= (((float)leftStickY - 134) / (255 - 134)) * 5;
+            }
+
+            if (rect2y < 0)
+            {
+                rect2y = 0;
+            }
+            else if (rect2y + RECT_SIZE >= DISPLAY_HEIGHT)
+            {
+                rect2y = DISPLAY_HEIGHT - RECT_SIZE;
+            }
+
+            // Move bouncy rect
             rectx += 1 * rectDirX;
             recty += 1 * rectDirY;
 
@@ -626,11 +690,15 @@ int main(void)
             if (bounce)
             {
                 rectColor = (rectColor + 1) % 6;
+                writeUart("Bounce\n");
             }
 
+            // Draw things
             memset(fb, 0, DISPLAY_WIDTH * DISPLAY_HEIGHT * 2);
             drawRect(rectx, recty, RECT_SIZE, RECT_SIZE, RECT_COLORS[rectColor]);
+            drawRect((int)rect2x, (int)rect2y, RECT_SIZE, RECT_SIZE, RECT_COLORS[rect2Color]);
 
+            // Swap FBs
             if (fb == fb1) 
             {
                 fb = fb2;
