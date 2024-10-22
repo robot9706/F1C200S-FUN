@@ -48,6 +48,7 @@ static void process_controller_input()
     int lastUse = (buttons & 0x800) != 0;
     int lastFire = (buttons & 0x08) != 0;
     int lastEnter = (buttons & 0x04) != 0;
+    int lastEscape = (buttons & 0x02) != 0;
     int lastStrafeLeft = 0;
     int lastStrafeRight = 0;
 
@@ -85,6 +86,7 @@ static void process_controller_input()
     int currentUse = (state.data.buttons & 0x800) != 0;
     int currentFire = (state.data.buttons & 0x08) != 0;
     int currentEnter = (state.data.buttons & 0x04) != 0;
+    int currentEscape = (state.data.buttons & 0x02) != 0;
     int currentStrafeLeft = 0;
     int currentStrafeRight = 0;
 
@@ -176,6 +178,13 @@ static void process_controller_input()
         event_t evt;
         evt.type = currentStrafeRight ? ev_keydown : ev_keyup;
         evt.data1 = KEY_STRAFE_R;
+        D_PostEvent(&evt);
+    }
+    if (lastEscape != currentEscape)
+    {
+        event_t evt;
+        evt.type = currentEscape ? ev_keydown : ev_keyup;
+        evt.data1 = KEY_ESCAPE;
         D_PostEvent(&evt);
     }
 

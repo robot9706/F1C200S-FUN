@@ -418,7 +418,7 @@ static void setup_uart2()
 {
     uint32_t cfg0 = read32(GPIOE + GPIO_CFG0);
     cfg0 = (cfg0 & ~(7 << 4)) | (0x03 << 4); // Enable UART0_TX on pin PE1
-    cfg0 = (cfg0 & ~7) | 0x03; // Enable UART0_TX on pin PE0
+    cfg0 = (cfg0 & ~7) | 0x03; // Enable UART0_RX on pin PE0
     write32(GPIOE + GPIO_CFG0, cfg0);
 
     gpio_init(GPIOE, PIN0 | PIN1, GPIO_MODE_AF5, GPIO_PULL_NONE, GPIO_DRV_3);
@@ -426,8 +426,6 @@ static void setup_uart2()
     clk_enable(CCU_BUS_CLK_GATE2, 20);
     clk_reset_clear(CCU_BUS_SOFT_RST2, 20);
     uart_init(UART0, 57600);
-
-    // uart_tx(UART0, '!');
 }
 
 #define JOY_SYNC_NONE 0

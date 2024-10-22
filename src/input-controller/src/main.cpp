@@ -121,6 +121,16 @@ static inline void setButtonRows(int activeRow)
     digitalWrite(BUTTONS_ROW_3, activeRow == 3);
 }
 
+static uint8_t readButtonRow()
+{
+    int b1 = digitalRead(BUTTONS_COL_1);
+    int b2 = digitalRead(BUTTONS_COL_2);
+    int b3 = digitalRead(BUTTONS_COL_3);
+    int b4 = digitalRead(BUTTONS_COL_4);
+
+    return (b1 | (b2 << 1) | (b3 << 2) | (b4 << 3));
+}
+
 static uint16_t scanButtons()
 {
     uint16_t buttons = 0;
@@ -129,12 +139,14 @@ static uint16_t scanButtons()
     {
         setButtonRows(row + 1);
 
-        int b1 = digitalRead(BUTTONS_COL_1);
-        int b2 = digitalRead(BUTTONS_COL_2);
-        int b3 = digitalRead(BUTTONS_COL_3);
-        int b4 = digitalRead(BUTTONS_COL_4);
+        delayMicroseconds(250);
+        uint8_t rowValue = readButtonRow();
 
-        uint16_t rowValue = (b1 | (b2 << 1) | (b3 << 2) | (b4 << 3));
+        for (int debounce = 0; debounce < 4; debounce++)
+        {
+            delayMicroseconds(250);
+            rowValue &= readButtonRow();
+        }
 
         buttons |= rowValue << (row * 4);
     }
