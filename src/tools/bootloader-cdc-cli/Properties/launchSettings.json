@@ -2,7 +2,7 @@
   "profiles": {
     "CLI": {
       "commandName": "Project",
-      "commandLineArgs": "--loop --uboot-fatload tcp:127.0.0.1:5000 mmc 0:1 loader-cdc2.bin --cdc COM22 ../../../../../bootloader-env/doom/build/doom.bin"
+      "commandLineArgs": "--loop on-uboot --uboot-fatload tcp:127.0.0.1:5000 mmc 0:1 loader-cdc2.bin --cdc COM22 ../../../../../bootloader-env/doom/build/doom.bin"
     }
   }
 }

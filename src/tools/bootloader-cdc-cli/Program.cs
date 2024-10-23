@@ -105,9 +105,16 @@ namespace CLI
             public List<string> Params = new List<string>();
         }
 
+        public enum LoopMode
+        {
+            None,
+            Manual,
+            UBoot,
+        }
+
         class Args
         {
-            public bool Loop;
+            public LoopMode Loop = LoopMode.None;
 
             public List<LoaderAction> Actions;
         }
@@ -123,14 +130,14 @@ namespace CLI
                     throw new Exception("No actions provided");
                 }
 
-                while (args.Loop)
+                while (args.Loop != LoopMode.None)
                 {
                     foreach (var action in args.Actions)
                     {
                         switch (action.Action)
                         {
                             case ActionEnum.UBootFatLoad:
-                                ExecuteUBootFatLoad(action.Params);
+                                ExecuteUBootFatLoad(action.Params, args);
                                 break;
                             case ActionEnum.LoadCDC:
                                 ExecuteCDCLoad(action.Params);
@@ -140,7 +147,7 @@ namespace CLI
 
                     Console.WriteLine("Done");
 
-                    if (args.Loop)
+                    if (args.Loop == LoopMode.Manual)
                     {
                         Console.WriteLine("Press ENTER to restart");
 
@@ -186,7 +193,22 @@ namespace CLI
                     switch (currentArg.Substring(2))
                     {
                         case "loop":
-                            ret.Loop = true;
+                            if (argsStack.Peek().StartsWith("--"))
+                            {
+                                ret.Loop = LoopMode.Manual;
+                            }
+                            else
+                            {
+                                string modeString = argsStack.Pop();
+                                if (modeString == "on-uboot")
+                                {
+                                    ret.Loop = LoopMode.UBoot;
+                                }
+                                else
+                                {
+                                    throw new Exception($"Unknown loop mode '{modeString}'");
+                                }
+                            }
                             break;
 
                         case "uboot-fatload":
@@ -293,12 +315,48 @@ namespace CLI
             return null;
         }
 
-        private static void ExecuteUBootFatLoad(List<string> args)
+        private static bool FindPattern(ref byte[] buffer, int bufferLength, byte[] pattern)
+        {
+            if (bufferLength < pattern.Length)
+            {
+                return false;
+            }
+
+            int end = buffer.Length - pattern.Length;
+            for (int x = 0; x < end; x++)
+            {
+                // Compare
+                bool compare = true;
+                for (int y = 0; y < pattern.Length; y++)
+                {
+                    if (buffer[x + y] != pattern[y])
+                    {
+                        compare = false;
+                        break;
+                    }
+                }
+
+                if (compare)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static void ExecuteUBootFatLoad(List<string> args, Args cliArgs)
         {
             if (args.Count != 4)
             {
                 throw new Exception("Invalid args");
             }
+
+            byte[] ubootPrompt = new byte[] { (byte)'=', (byte)'>' };
+            byte[] ubootHeader = new byte[] { (byte)'U', (byte)'-', (byte)'B', (byte)'o', (byte)'o', (byte)'t' };
+
+            byte[] buffer = new byte[128];
+            int bufferPointer = 0;
 
             string port = args[0];
 
@@ -315,38 +373,55 @@ namespace CLI
                 throw new Exception($"[UBOOT] Port not found '{port}'");
             }
 
-            Console.WriteLine("[UBOOT] Got serial, entering prompt");
+            Console.WriteLine("[UBOOT] Got serial");
+
+            if (cliArgs.Loop == LoopMode.UBoot)
+            {
+                Console.WriteLine("[UBOOT] Waiting for 'U-Boot'");
+
+                while (true)
+                {
+                    Thread.Sleep(50);
+
+                    bufferPointer += serial.Read(buffer, bufferPointer, buffer.Length - bufferPointer);
+                    if (FindPattern(ref buffer, bufferPointer, ubootHeader))
+                    {
+                        break;
+                    }
+                    else if (bufferPointer > ubootHeader.Length)
+                    {
+                        int from = Math.Max(0, bufferPointer - ubootHeader.Length);
+                        int len = buffer.Length - from;
+                        Array.Copy(buffer, from, buffer, 0, len);
+                        bufferPointer = len;
+                    }
+                }
+
+                Console.WriteLine("[UBOOT] Got 'U-Boot'");
+            }
+
+            Array.Clear(buffer);
+            bufferPointer = 0;
 
             DateTimeOffset timeout = DateTimeOffset.UtcNow.AddMilliseconds(UBOOT_PROMPT_TIMEOUT);
-            byte[] promptBuffer = new byte[128];
-            int promptBufferPointer = 0;
             bool hasPrompt = false;
             while (DateTimeOffset.UtcNow < timeout && !hasPrompt)
             {
                 serial.Write(new byte[] { 0x0D }, 0, 1); // CR
                 Thread.Sleep(50);
 
-                promptBufferPointer += serial.Read(promptBuffer, promptBufferPointer, promptBuffer.Length - promptBufferPointer);
-
-                if (promptBufferPointer > 1) // At least 2 bytes in the buffer
+                bufferPointer += serial.Read(buffer, bufferPointer, buffer.Length - bufferPointer);
+                if (FindPattern(ref buffer, bufferPointer, ubootPrompt))
                 {
-                    for (int x = 0; x < promptBufferPointer - 1; x++)
-                    {
-                        if (promptBuffer[x] == '=' && promptBuffer[x + 1] == '>')
-                        {
-                            // Found prompt
-                            hasPrompt = true;
-                            break;
-                        }
-                    }
-
-                    if (hasPrompt)
-                    {
-                        break;
-                    }
-
-                    promptBuffer[0] = promptBuffer[promptBufferPointer - 1];
-                    promptBufferPointer = 1;
+                    hasPrompt = true;
+                    break;
+                }
+                else if (bufferPointer > ubootPrompt.Length)
+                {
+                    int from = Math.Max(0, bufferPointer - ubootPrompt.Length);
+                    int len = buffer.Length - from;
+                    Array.Copy(buffer, from, buffer, 0, buffer.Length - from);
+                    bufferPointer = len;
                 }
             }
 
@@ -355,7 +430,9 @@ namespace CLI
                 throw new Exception("Failed to obtain UBoot prompt");
             }
 
-            Console.WriteLine("[UBOOT] " + command);
+            Console.WriteLine("[UBOOT] Got prompt");
+
+            Console.Write("[UBOOT] " + command);
             Console.WriteLine("[UBOOT] Done");
 
             serial.Write(command);
@@ -390,16 +467,25 @@ namespace CLI
             long tx = 0;
             using (FileStream inputFile = new FileStream(file, FileMode.Open))
             {
-                byte[] buffer = new byte[64];
+                long fileLength = inputFile.Length;
+                if (fileLength > UInt32.MaxValue)
+                {
+                    throw new Exception($"Input file is larger than max! {fileLength}");
+                }
 
+                // Send the EP3COMMAND_UPLOAD_TO_RAM command
+                byte[] commandBuffer = new byte[] { 0xA1, (byte)(fileLength & 0xFF), (byte)((fileLength >> 8) & 0xFF), (byte)((fileLength >> 16) & 0xFF), (byte)((fileLength >> 24) & 0xFF) };
+                port.Write(commandBuffer, 0, commandBuffer.Length);
+                port.Flush();
+
+                // Transfer data in 64byte chunks
+                byte[] buffer = new byte[256];
                 while (inputFile.Position < inputFile.Length)
                 {
-                    int readCount = inputFile.Read(buffer, 1, buffer.Length - 1);
+                    int readCount = inputFile.Read(buffer, 0, buffer.Length);
 
                     // Write data packet
-                    buffer[0] = (byte)readCount;
-                    port.Write(buffer, 0, readCount + 1);
-
+                    port.Write(buffer, 0, readCount);
                     port.Flush();
 
                     Console.Write(".");
@@ -416,8 +502,9 @@ namespace CLI
             // Done
             //Console.WriteLine("[CDC] Press enter to boot");
             //Console.ReadLine();
-            
-            port.Write(new byte[] { 0x00 }, 0, 1);
+
+            // Send the EP3COMMAND_EXECUTE command
+            port.Write((byte)0xB1);
 
             try
             {

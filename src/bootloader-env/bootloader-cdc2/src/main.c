@@ -24,10 +24,15 @@
 
 static uint32_t loadAddress = LOAD_ADDR;
 
+#define EP3COMMAND_UPLOAD_TO_RAM 0xa1 // args: 32bit data length
+#define EP3COMMAND_EXECUTE 0xb1
+
 #define EP3STATE_WAIT_COMMAND 0
-#define EP3STATE_WAIT_DATA 1
-#define EP3STATE_WAIT_DMA 2
+#define EP3STATE_WAIT_COMMAND_ARGS 1
+#define EP3STATE_WAIT_DATA 2
+#define EP3STATE_WAIT_DMA 3
 static uint32_t ep3State = EP3STATE_WAIT_COMMAND;
+static uint32_t ep3CurrentCommand = 0;
 static uint32_t ep3DataLength = 0;
 
 // USB descriptors
@@ -189,7 +194,7 @@ static struct
         5,              // bDescriptorType
         0x03,           // bEndpointAddress:    EP3 & Out (Host -> Device)
         2,              // bmAttributes:        Bulk
-        64,             // wMaxPacketSize
+        512,            // wMaxPacketSize
         0               // bInterval
     }
 };
@@ -654,57 +659,64 @@ static void handle_ep3_in()
 #if DEBUG
             printStr("EP3 command 0x");
             print8(command);
+            printChar('\n');
+#endif
+
+            if (command == EP3COMMAND_EXECUTE)
+            {
+                usb_deinit();
+
+                execute();
+
+                return;
+            }
+            else
+            {
+                ep3CurrentCommand = command;
+                ep3State = EP3STATE_WAIT_COMMAND_ARGS;
+            }
+
+            ep3Bytes = USB->RXCOUNT;
+            if (ep3Bytes == 0)
+            {
+                USB->RXCSR &= ~1;
+                break;
+            }
+
+        case EP3STATE_WAIT_COMMAND_ARGS:
+#if DEBUG
+            printStr("EP3 command arg 0x");
+            print8(ep3CurrentCommand);
             printChar(' ');
             printDec8(ep3Bytes);
             printChar('\n');
 #endif
 
-            if (command == 0) // Done uploading, GO
+            if (ep3CurrentCommand == EP3COMMAND_UPLOAD_TO_RAM && ep3Bytes >= 4)
             {
-                printStr("DONE!\n");
+                uint8_t b0 = USB->FIFO[epAddr].byte;
+                uint8_t b1 = USB->FIFO[epAddr].byte;
+                uint8_t b2 = USB->FIFO[epAddr].byte;
+                uint8_t b3 = USB->FIFO[epAddr].byte;
 
-                usb_deinit();
-
-                execute();
-            }
-
-            ep3DataLength = command;
-            ep3State = EP3STATE_WAIT_DATA;
+                ep3DataLength = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+                ep3State = EP3STATE_WAIT_DATA;
+                USB->RXCSR &= ~1;
 
 #if DEBUG
-            printStr("EP3 data len ");
-            printDec8(ep3DataLength);
-            printChar('\n');
-#endif
-            ep3Bytes = USB->RXCOUNT;
-
-#if DEBUG
-        printStr("Check FIFO ");
-        printDec8(ep3Bytes);
-        printChar('\n');
-#endif
-
-            if (ep3Bytes < ep3DataLength) // If we already have the data, keep going
-            {
-                break;
-            }
-        case EP3STATE_WAIT_DATA:
-            if (ep3Bytes < ep3DataLength)
-            {
-                // Still waiting for data
-                printStr("WAIT ");
-                printDec8(ep3DataLength);
-                printChar(' ');
-                printDec8(ep3Bytes);
+                printStr("EP3 data len ");
+                print32(ep3DataLength);
                 printChar('\n');
-                return;
+#endif
             }
+            break;
 
+        case EP3STATE_WAIT_DATA:
             // Got data, start DMA
             NDMA_T* dma = NDMA(0);
             dma->SRC = (uint32_t)USB_BASE + 0x0C;
             dma->DST = loadAddress;
-            dma->BYTE_COUNTER = ep3DataLength;
+            dma->BYTE_COUNTER = ep3Bytes;
             dma->CFG = (0x11 | (1 << 5) | (0x11 << 16) | (1 << 31));
 
             while (dma->CFG & (1 << 31))
@@ -718,7 +730,8 @@ static void handle_ep3_in()
             printChar('\n');
 #endif
 
-            loadAddress += ep3DataLength;
+            ep3DataLength -= ep3Bytes;
+            loadAddress += ep3Bytes;
             ep3State = EP3STATE_WAIT_DMA;
             break;
     }
@@ -739,11 +752,25 @@ static void usb_handler()
             USB->RXCSR &= ~1;
             USB->EP_IDX = 0;
 
-            ep3DataLength = 0;
-            ep3State = EP3STATE_WAIT_COMMAND;
+            if (ep3DataLength <= 0)
+            {
+                ep3DataLength = 0;
+                ep3State = EP3STATE_WAIT_COMMAND;
+
 #if DEBUG
-            printStr("EP3 DMA done\n");
+                printStr("EP3 data transfer complete\n");
 #endif
+            }
+            else
+            {
+                ep3State = EP3STATE_WAIT_DATA;
+
+#if DEBUG
+                printStr("EP3 data left ");
+                print32(ep3DataLength);
+                printChar('\n');
+#endif
+            }
         }
     }
 
