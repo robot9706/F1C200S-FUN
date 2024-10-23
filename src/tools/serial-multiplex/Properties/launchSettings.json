@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "serial-multiplex": {
+      "commandName": "Project",
+      "commandLineArgs": "--com COM23 --baud 115200"
+    }
+  }
+}

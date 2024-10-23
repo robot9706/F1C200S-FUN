@@ -93,5 +93,9 @@
 #define KEYP_EQUALS     KEY_EQUALS
 #define KEYP_ENTER      KEY_ENTER
 
+// Custom
+#define KEY_NEXT_WEAPON 0xf1
+#define KEY_PREV_WEAPON 0xf2
+
 #endif          // __DOOMKEYS__
 

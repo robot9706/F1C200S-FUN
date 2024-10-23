@@ -49,6 +49,9 @@ static void process_controller_input()
     int lastFire = (buttons & 0x08) != 0;
     int lastEnter = (buttons & 0x04) != 0;
     int lastEscape = (buttons & 0x02) != 0;
+    int lastPrevWeapon = (buttons & 0x200) != 0;
+    int lastNextWeapon = (buttons & 0x400) != 0;
+    int lastMap = (buttons & 0x100) != 0;
     int lastStrafeLeft = 0;
     int lastStrafeRight = 0;
 
@@ -87,6 +90,9 @@ static void process_controller_input()
     int currentFire = (state.data.buttons & 0x08) != 0;
     int currentEnter = (state.data.buttons & 0x04) != 0;
     int currentEscape = (state.data.buttons & 0x02) != 0;
+    int currentPrevWeapon = (state.data.buttons & 0x200) != 0;
+    int currentNextWeapon = (state.data.buttons & 0x400) != 0;
+    int currentMap = (state.data.buttons & 0x100) != 0;
     int currentStrafeLeft = 0;
     int currentStrafeRight = 0;
 
@@ -185,6 +191,27 @@ static void process_controller_input()
         event_t evt;
         evt.type = currentEscape ? ev_keydown : ev_keyup;
         evt.data1 = KEY_ESCAPE;
+        D_PostEvent(&evt);
+    }
+    if (lastPrevWeapon != currentPrevWeapon)
+    {
+        event_t evt;
+        evt.type = currentPrevWeapon ? ev_keydown : ev_keyup;
+        evt.data1 = KEY_PREV_WEAPON;
+        D_PostEvent(&evt);
+    }
+    if (lastNextWeapon != currentNextWeapon)
+    {
+        event_t evt;
+        evt.type = currentNextWeapon ? ev_keydown : ev_keyup;
+        evt.data1 = KEY_NEXT_WEAPON;
+        D_PostEvent(&evt);
+    }
+    if (lastMap != currentMap)
+    {
+        event_t evt;
+        evt.type = currentMap ? ev_keydown : ev_keyup;
+        evt.data1 = KEY_TAB;
         D_PostEvent(&evt);
     }
 

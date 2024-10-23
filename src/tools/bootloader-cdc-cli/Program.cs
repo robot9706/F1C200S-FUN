@@ -1,9 +1,92 @@
 ﻿using System.Diagnostics;
 using System.IO.Ports;
-using System.Threading;
+using System.Net.Sockets;
+using System.Runtime.InteropServices.Marshalling;
+using System.Text;
 
 namespace CLI
 {
+    abstract class PortLike
+    {
+        public void Write(byte val)
+        {
+            Write(new byte[] { val }, 0, 1);
+        }
+
+        public void Write(string str)
+        {
+            byte[] buf = Encoding.ASCII.GetBytes(str);
+            Write(buf, 0, buf.Length);
+        }
+
+        public abstract void Write(byte[] buffer, int offset, int count);
+        public abstract int Read(byte[] buffer, int offset, int count);
+        public abstract void Flush();
+        public abstract void Close();
+    }
+
+    class ComPort : PortLike
+    {
+        private SerialPort _com;
+
+        public ComPort(string com, int baud)
+        { 
+            _com = new SerialPort(com, baud);
+            _com.Open();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            return _com.Read(buffer, offset, count);
+        }
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            _com.Write(buffer, offset, count);
+        }
+
+        public override void Close()
+        {
+            _com.Close();
+        }
+
+        public override void Flush()
+        {
+            _com.BaseStream.Flush();
+        }
+    }
+
+    class TcpPort : PortLike
+    {
+        private TcpClient _client;
+
+        public TcpPort(string address, int port)
+        {
+            _client = new TcpClient();
+            _client.Connect(address, port);
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            return _client.GetStream().Read(buffer, offset, count);
+        }
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            _client.GetStream().Write(buffer, offset, count);
+        }
+
+        public override void Close()
+        {
+            _client.Close();
+        }
+
+        public override void Flush()
+        {
+            _client.GetStream().Flush();
+        }
+    }
+
     internal class Program
     {
         static int PORT_TIMEOUT_MS = 5000;
@@ -136,17 +219,16 @@ namespace CLI
             return ret;
         }
 
-        private static SerialPort WaitForPort(string portName, int baud, int timeoutMs)
+        private static PortLike WaitForComPort(string port, int baud, int timeoutMs)
         {
             DateTimeOffset timeout = DateTimeOffset.UtcNow.AddMilliseconds(timeoutMs);
             while (DateTimeOffset.UtcNow < timeout)
             {
                 try
                 {
-                    SerialPort port = new SerialPort(portName, baud);
-                    port.Open();
+                    ComPort com = new ComPort(port, baud);
 
-                    return port;
+                    return com;
                 }
                 catch (FileNotFoundException)
                 {
@@ -154,6 +236,58 @@ namespace CLI
 
                     continue;
                 }
+            }
+
+            return null;
+        }
+
+        private static PortLike WaitForTcp(string address, int port, int timeoutMs)
+        {
+            DateTimeOffset timeout = DateTimeOffset.UtcNow.AddMilliseconds(timeoutMs);
+            while (DateTimeOffset.UtcNow < timeout)
+            {
+                try
+                {
+                    TcpPort tcp = new TcpPort(address, port);
+
+                    return tcp;
+                }
+                catch (SocketException)
+                {
+                    Thread.Sleep(250);
+
+                    continue;
+                }
+            }
+
+            return null;
+        }
+
+        private static PortLike WaitForPort(string portParam, int timeoutMs)
+        {
+            string[] param = portParam.Split(':');
+
+            if (param.Length == 1)
+            {
+                return WaitForComPort(param[0], 115200, timeoutMs);
+            }
+            else if (param.Length == 2)
+            {
+                return WaitForComPort(param[0], Convert.ToInt32(param[1]), timeoutMs);
+            }
+            else if (param.Length == 3)
+            {
+                switch (param[0])
+                {
+                    case "serial":
+                        return WaitForComPort(param[1], Convert.ToInt32(param[2]), timeoutMs);
+                    case "tcp":
+                        return WaitForTcp(param[1], Convert.ToInt32(param[2]), timeoutMs);
+                }
+            }
+            else
+            {
+                throw new Exception($"Unknown port parameters '{portParam}'");
             }
 
             return null;
@@ -172,10 +306,10 @@ namespace CLI
             string ubootDiskPart = args[2];
             string ubootDiskFile = args[3];
 
-            string command = $"fatload {ubootDisk} {ubootDiskPart} 80000000 {ubootDiskFile}; go 80000000;";
+            string command = $"fatload {ubootDisk} {ubootDiskPart} 80000000 {ubootDiskFile}; go 80000000;\n";
             Console.WriteLine($"[UBOOT] Waiting for UBoot on port '{port}'");
 
-            SerialPort serial = WaitForPort(port, 115200, PORT_TIMEOUT_MS);
+            PortLike serial = WaitForPort(port, PORT_TIMEOUT_MS);
             if (serial == null)
             {
                 throw new Exception($"[UBOOT] Port not found '{port}'");
@@ -226,7 +360,7 @@ namespace CLI
 
             serial.Write(command);
             serial.Write(new byte[] { 0x0D }, 0, 1); // Execute
-            serial.BaseStream.Flush();
+            serial.Flush();
 
             serial.Close();
         }
@@ -243,7 +377,7 @@ namespace CLI
 
             Console.WriteLine($"[CDC] Waiting for serial '{portName}'");
 
-            SerialPort port = WaitForPort(portName, 115200, PORT_TIMEOUT_MS);
+            PortLike port = WaitForPort(portName, PORT_TIMEOUT_MS);
             if (port == null) 
             {
                 throw new Exception($"[CDC] Port not found '{portName}'");
@@ -266,10 +400,9 @@ namespace CLI
                     buffer[0] = (byte)readCount;
                     port.Write(buffer, 0, readCount + 1);
 
-                    port.BaseStream.Flush();
+                    port.Flush();
 
                     Console.Write(".");
-                    // Thread.Sleep(10);
                 }
 
                 tx = inputFile.Length;
@@ -288,7 +421,7 @@ namespace CLI
 
             try
             {
-                port.BaseStream.Flush();
+                port.Flush();
                 port.Close();
             }
             catch
