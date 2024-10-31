@@ -1,0 +1,10 @@
+{
+    "files.associations": {
+        "m_config.h": "c",
+        "stringfunc.h": "c",
+        "display.h": "c",
+        "ff.h": "c",
+        "deh_misc.h": "c",
+        "i_glob.h": "c"
+    }
+}

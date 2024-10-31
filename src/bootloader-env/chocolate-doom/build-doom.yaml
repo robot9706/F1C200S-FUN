@@ -1,0 +1,133 @@
+version: "1"
+build:
+    args:
+        - PROJECTROOT
+        - TOOLBIN
+    variables:
+        - TOOLCHAIN="$(TOOLBIN)/arm-none-eabi-"
+        - OBJFOLDER="$(PROJECTROOT)/obj"
+        - BUILDFOLDER="$(PROJECTROOT)/build"
+        - OPT=-Os
+        - LINK_SCRIPT="$(PROJECTROOT)/f1c200s_dram.ld"
+        - DRAM_SIZE=64M
+        - LIBS:
+            - "-lgcc"
+            - "-lm"
+            - "-lc_nano"
+        - INCLUDES:
+            - "-I$(PROJECTROOT)/src"
+            - "-I$(PROJECTROOT)/src/f1c100s"
+            - "-I$(PROJECTROOT)/src/f1c100s/system/arm926/inc"
+            - "-I$(PROJECTROOT)/src/f1c100s/system/drivers/inc"
+            - "-I$(PROJECTROOT)/src/f1c100s/lib"
+            - "-I$(PROJECTROOT)/src/f1c100s/lib/printf"
+            - "-I$(PROJECTROOT)/src/f1c100s/lib/syscalls"
+            - "-I$(PROJECTROOT)/src/f1c100s/fatfs"
+            - "-I$(PROJECTROOT)/src/doom"
+        - DEFS:
+            - "-D__ARM32_ARCH__=5"
+            - "-D__ARM926EJS__"
+            - "-DPRINTF_ALIAS_STANDARD_FUNCTION_NAMES=1"
+            - "-DPRINTF_ALIAS_STANDARD_FUNCTION_NAMES_HARD=1"
+        - COMPILE_FLAGS:
+            - "-march=armv5te"
+            - "-mtune=arm926ej-s"
+            - "-mfloat-abi=soft"
+            - "-marm"
+            - "-mno-thumb-interwork"
+            - "-g"
+            - "-ggdb"
+            - "-Wall"
+            - "-fdata-sections"
+            - "-ffunction-sections"
+            - "-ffreestanding"
+            - "-std=gnu99"
+        - ASFLAGS:
+            - "$(COMPILE_FLAGS)"
+            - "$(DEFS)"
+        - CFLAGS:
+            - "$(COMPILE_FLAGS)"
+            - "$(OPT)"
+            - "-fomit-frame-pointer"
+            - "-Wall"
+            - "-fverbose-asm"
+            - "$(DEFS)"
+        - LDFLAGS:
+            - "-nostartfiles"
+            - "-Xlinker" 
+            - "--gc-sections" 
+            - "-T$(LINK_SCRIPT)"
+            - "-Wl,--defsym=DRAM_SIZE=$(DRAM_SIZE),-Map=$(BUILDFOLDER)/build.map,--cref,--no-warn-mismatch"
+        - OBJS=$[$(OBJFOLDER)/**/*.obj]
+    tools:
+        - CC: $(TOOLCHAIN)gcc.exe
+        - CP: $(TOOLCHAIN)objcopy.exe
+        - SZ: $(TOOLCHAIN)size.exe
+        - AS:
+            bin: $(TOOLCHAIN)gcc.exe
+            args: -x assembler-with-cpp
+    targets:
+        build:
+            steps:
+                - name: "Build assembly"
+                  scan:
+                    mode: c-include
+                    resolve: $(INCLUDES)
+                  tool: CC
+                  args: "-c $(ASFLAGS) $(INCLUDES) ${IN} -o ${OUT}"
+                  in:
+                    - "$(PROJECTROOT)/src/f1c100s/system/arm926/src/vectors.S"
+                    - "$(PROJECTROOT)/src/f1c100s/system/arm926/src/cache-v5.S"
+                  out: $(OBJFOLDER)/asm
+                - name: "Build Doom common"
+                  scan:
+                    mode: c-include
+                    resolve: $(INCLUDES)
+                  tool: CC
+                  args: "-c $(CFLAGS) $(INCLUDES) ${IN} -o ${OUT}"
+                  in:
+                    - "$(PROJECTROOT)/src/*.c"
+                  out: $(OBJFOLDER)/doom-core
+                - name: "Build FatFS"
+                  scan:
+                    mode: c-include
+                    resolve: $(INCLUDES)
+                  tool: CC
+                  args: "-c $(CFLAGS) $(INCLUDES) ${IN} -o ${OUT}"
+                  in:
+                    - "$(PROJECTROOT)/src/f1c100s/fatfs/*.c"
+                  out: $(OBJFOLDER)/fatfs
+                - name: "Build F1C100s"
+                  scan:
+                    mode: c-include
+                    resolve: $(INCLUDES)
+                  tool: CC
+                  args: "-c $(CFLAGS) $(INCLUDES) ${IN} -o ${OUT}"
+                  in:
+                    - "$(PROJECTROOT)/src/f1c100s/system/drivers/src/*.c"
+                    - "$(PROJECTROOT)/src/f1c100s/lib/printf/printf.c"
+                    - "$(PROJECTROOT)/src/f1c100s/lib/syscalls/syscalls.c"
+                    - "$(PROJECTROOT)/src/f1c100s/lib/*.c"
+                    - "$(PROJECTROOT)/src/f1c100s/*.c"
+                  out: $(OBJFOLDER)/f1c100s
+                - name: "Build Doom game"
+                  scan:
+                    mode: c-include
+                    resolve: $(INCLUDES)
+                  tool: CC
+                  args: "-c $(CFLAGS) $(INCLUDES) ${IN} -o ${OUT}"
+                  in:
+                    - "$(PROJECTROOT)/src/doom/*.c"
+                  out: $(OBJFOLDER)/doom
+                - name: "Link ELF"
+                  tool: CC
+                  args: "$(LDFLAGS) -o ${OUT} $(OBJS) $(LIBS)"
+                  out: $(BUILDFOLDER)/doom.elf
+                - name: "Build binary"
+                  tool: CP
+                  args: "-O binary $(BUILDFOLDER)/doom.elf ${OUT}"
+                  out: $(BUILDFOLDER)/doom.bin
+                - name: "Size"
+                  tool: SZ
+                  args: "${IN}"
+                  in: $(BUILDFOLDER)/doom.elf

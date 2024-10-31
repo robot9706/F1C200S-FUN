@@ -180,7 +180,7 @@ void I_UpdateNoBlit (void)
 {
 }
 
-// Update a small portion of the screen
+// Update a small portion of the screenf
 //
 // Does stretching and buffer blitting if neccessary
 //
