@@ -1441,16 +1441,6 @@ void D_DoomMain (void)
         DEH_AddStringReplacement("M_GDLOW", "M_MSGOFF");
     }
 
-#ifdef FEATURE_DEHACKED
-    // Load Dehacked patches specified on the command line with -deh.
-    // Note that there's a very careful and deliberate ordering to how
-    // Dehacked patches are loaded. The order we use is:
-    //  1. IWAD dehacked patches.
-    //  2. Command line dehacked patches specified with -deh.
-    //  3. PWAD dehacked patches in DEHACKED lumps.
-    DEH_ParseCommandLine();
-#endif
-
     // Load PWAD files.
     modifiedgame = W_ParseCommandLine();
 

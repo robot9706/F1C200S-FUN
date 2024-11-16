@@ -37,27 +37,6 @@
 #define DEH_DEFAULT_BFG_CELLS_PER_SHOT 40
 #define DEH_DEFAULT_SPECIES_INFIGHTING 0
 
-#ifdef FEATURE_DEHACKED
-
-extern int deh_initial_health;             
-extern int deh_initial_bullets;            
-extern int deh_max_health;                 
-extern int deh_max_armor;                  
-extern int deh_green_armor_class;          
-extern int deh_blue_armor_class;           
-extern int deh_max_soulsphere;             
-extern int deh_soulsphere_health;          
-extern int deh_megasphere_health;          
-extern int deh_god_mode_health;            
-extern int deh_idfa_armor;                 
-extern int deh_idfa_armor_class;           
-extern int deh_idkfa_armor;                
-extern int deh_idkfa_armor_class;          
-extern int deh_bfg_cells_per_shot;         
-extern int deh_species_infighting;           
-
-#else
-
 // If dehacked is disabled, hard coded values
 
 #define deh_initial_health      DEH_DEFAULT_INITIAL_HEALTH

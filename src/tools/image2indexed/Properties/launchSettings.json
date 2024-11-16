@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "image2indexed": {
+      "commandName": "Project",
+      "commandLineArgs": ""
+    }
+  }
+}
