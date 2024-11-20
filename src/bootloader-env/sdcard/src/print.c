@@ -87,6 +87,22 @@ void print32(uint32_t u32)
     }
 }
 
+void print64(uint64_t u64)
+{
+    union
+    {
+        uint64_t val;
+        uint8_t ar[8];
+    } helper;
+    
+    helper.val = u64;
+
+    for (int i = 7; i >= 0; i--)
+    {
+        print8(helper.ar[i]);
+    }
+}
+
 void printDec8(uint8_t u8)
 {
     printDec(u8, 100);

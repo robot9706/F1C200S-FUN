@@ -19,12 +19,20 @@
 #define PACKED __attribute__((packed))
 
 #define SD_VERSION_UNKNOWN (0)
-#define SD_VERSION_1 (1)
-#define SD_VERSION_2 (2)
+#define SD_VERSION_SD_V1 (1)
+#define SD_VERSION_SD_V2 (2)
+
+#define SD_FLAG_CCS (1 << 0) // Card capacity flag, it means a high capacity card
 
 typedef struct 
 {
     uint8_t version;
+    uint8_t flags;
+    uint16_t rca;
+
+    uint16_t blockLength;
+    uint32_t blockCount;
+    uint64_t capacity;
 } sdcard_info;
 
 // Allwinner PDF page 255, section 7.1
@@ -74,6 +82,7 @@ typedef struct
 #define SD_GCTL_REG_FIFO_RST (1 << 1)
 #define SD_GCTL_REG_DMA_RST (1 << 2)
 #define SD_GCTL_REG_CD_DBC_ENB (1 << 8) // Card detect debounce
+#define SD_GCTL_REG_FIFO_AC_MOD (1 << 31) // 0 = DMA access, 1 = AHB bus access
 
 #define SD_CKCR_REG_CCLK_ENB (1 << 16) // Card clock enable
 #define SD_CKCR_REG_CCLK_CTRL (1 << 17) // Card clock output control: Turn off clock when FSM in IDLE
@@ -127,9 +136,23 @@ typedef struct
 #define SD_RISR_REG_DONE_MASK \
     (SD_RISR_REG_AUTO_COMMAND_DONE | SD_RISR_REG_DATA_TRANSFER_COMPLETE | SD_RISR_REG_COMMAND_COMPLETE | SD_RISR_REG_DATA_STARVATION_OR_VOLTAGE_CHANGE)
 
+// Allwinner pdf page 255
+#define SD_STAR_FIFO_RX_TRIGGER (1 << 0)
+#define SD_STAR_FIFO_TX_TRIGGER (1 << 1)
+#define SD_STAR_FIFO_EMPTY (1 << 2)
+#define SD_STAR_FIFO_FULL  (1 << 3)
+#define SD_STAR_CARD_PRESENT  (1 << 8)
+#define SD_STAR_CARD_BUSY  (1 << 9)
+#define SD_STAR_FIFO_LEVEL(REG) ((REG >> 17) & 0x1F)
+#define SD_STAR_DMA_REQ  (1 << 31)
+
+// SD.pdf page 120, section 4.10.1
+#define CARDSTATUS_APPCMD (1 << 5) // The card is expecting an APPCMD
+
 // SD.pdf page 178, section 5.1
-#define OCR_BUSY (1 << 31)
+#define OCR_POWERUP_READY (1 << 31) // The docs say that this is a busy flag, but in fact this is a ready flag :)
 #define OCR_CCS (1 << 30) // 0 = SDSD, 1 = SDHC/SDXC
+#define OCR_VDD_MASK (0xFF8000) // 2.7 - 3.6V in 100mV steps
 
 // Resets the SD controller (FIFO, DMA) and enables the debounce on card detect
 static void sd_reset_full(SD_T* sd)
@@ -219,16 +242,20 @@ static int sd_go_idle(SD_T* sd)
 }
 
 // Sends the interface conditions to the SD card
-static int sd_send_interface_conditions(SD_T* sd)
+static int sd_send_interface_conditions(SD_T* sd, sdcard_info* card)
 {
     // SD.pdf page 92, section 4.3.13
     uint8_t checkPattern = 0xAA;
     uint32_t argument = (1 << 8) | checkPattern; // 2.7-3.6V, 0xAA = pattern check
 
-    if (!sd_transfer_command(sd, SD_CMD_REG_RESP_RCV | 8, argument))
+    if (!sd_transfer_command(sd, SD_CMD_REG_CHK_RESP_CRC | SD_CMD_REG_RESP_RCV | 8, argument))
     {
-        printStr("(CMD8 fail)");
-        return 0;
+        // TODO: Check illegal command flag
+        printStr("(CMD8 fail -> probably V1)");
+
+        card->version = SD_VERSION_SD_V1;
+
+        return 1;
     }
 
     // CMD8 has 48bits of response (-start bit, -transmission bit, -crc, -stop bit)
@@ -246,56 +273,408 @@ static int sd_send_interface_conditions(SD_T* sd)
         return 0;
     }
 
+    // If CMD8 works, it's a V2 card
+    card->version = SD_VERSION_SD_V2;
+
     return 1;
 }
 
-static int sd_send_operating_conditions(SD_T* sd)
+static int sd_start_app_cmd(SD_T* sd, uint16_t rca)
 {
+    uint32_t arg = rca << 16;
+
     // Send CMD55 because the next command is an app specific command
-    if (!sd_transfer_command(sd, SD_CMD_REG_RESP_RCV | 55, 0))
+    if (!sd_transfer_command(sd, SD_CMD_REG_CHK_RESP_CRC | SD_CMD_REG_RESP_RCV | 55, arg))
+    {
+        printStr("(CMD55 fail)\n");
+        return 0;
+    }
+
+    uint8_t cardStatus = sd->SD_RESP0_REG;
+    if (!(cardStatus & CARDSTATUS_APPCMD))
+    {
+        printStr("(APPCMD status fail ");
+        print32(cardStatus);
+        printStr(")\n");
+        return 0;
+    }
+
+    return 1;
+}
+
+// Ask the card to send its operating conditions
+static int sd_send_operating_conditions(SD_T* sd, sdcard_info* card)
+{
+    uint32_t voltageWindow = 0x00ff8000; // All voltages set from 2.7V to 3.6V
+
+    uint32_t ocr = 0;
+    do
+    {
+        // Send CMD55 because the next command is an app specific command
+        if (!sd_start_app_cmd(sd, 0))
+        {
+            printStr("(CMD55 fail)");
+            return 0;
+        }
+
+        uint32_t acmd41Arg = 0x50000000 | voltageWindow; // HCS + XPC + voltage window
+        if (!sd_transfer_command(sd, SD_CMD_REG_RESP_RCV | 41, acmd41Arg))
+        {
+            printStr("(ACMD41 fail)\n");
+            return 0;
+        }
+
+        ocr = sd->SD_RESP0_REG;
+
+        if (!(ocr & OCR_POWERUP_READY))
+        {
+            sdelay(1000000);
+        }
+    } while (!(ocr & OCR_POWERUP_READY));
+
+    if ((ocr & OCR_VDD_MASK) == 0)
+    {
+        printStr("(ACMD41 unsupported voltage range)");
+
+        return 0;
+    }
+
+    if (ocr & OCR_CCS)
+    {
+        card->flags |= SD_FLAG_CCS;
+        printStr("(HC/XC)");
+    }
+
+    return 1;
+}
+
+static int sd_get_cid(SD_T* sd, sdcard_info* card)
+{
+    // Send CMD2, response is R2 which is 136bits
+    if (!sd_transfer_command(sd, SD_CMD_REG_RESP_RCV | SD_CMD_REG_LONG_RESP | SD_CMD_REG_CHK_RESP_CRC | 2, 0))
+    {
+        printStr("(CMD2 fail)");
+        
+        return 0;
+    }
+
+    uint32_t cid0 = sd->SD_RESP0_REG;
+    uint32_t cid1 = sd->SD_RESP1_REG;
+    uint32_t cid2 = sd->SD_RESP2_REG;
+    uint32_t cid3 = sd->SD_RESP3_REG;
+
+    print32(cid0);
+    printChar(' ');
+    print32(cid1);
+    printChar(' ');
+    print32(cid2);
+    printChar(' ');
+    print32(cid3);
+    printChar(' ');
+
+    // Whatever, SD.pdf page 180, section 5.12
+
+    return 1;
+}
+
+// Ask the card to publish a new relative address which is unsed in addressed commands
+static int sd_get_rca(SD_T* sd, sdcard_info* card)
+{
+    // Send CMD3, response is R6
+    if (!sd_transfer_command(sd, SD_CMD_REG_RESP_RCV | SD_CMD_REG_CHK_RESP_CRC | 3, 0))
+    {
+        printStr("(CMD3 fail)");
+        
+        return 0;
+    }
+
+    uint32_t resp = sd->SD_RESP0_REG;
+    card->rca = (resp >> 16) & 0xFFFF;
+
+    printStr("(RCA ");
+    printDec16(card->rca);
+    printChar(')');
+
+    return 1;
+}
+
+static int decode_csd_v2(sdcard_info* card, uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3)
+{
+    // SD.pdf page 182, section 5.3.2
+    uint16_t read_bl_len = 1 << ((d2 >> 16) & 0x0F);
+    printStr("\n\t\tRead block length ");
+    printDec16(read_bl_len);
+    if (read_bl_len != 512)
+    {
+        // CSD v2 only support 512 block sizes
+        printStr("\n\t\tUnexpected block size!");
+        return 0;
+    }
+
+    card->blockLength = read_bl_len; // CSD v2 spec says that read_bl_len = write_bl_len;
+
+    uint32_t c_size1 = (d1 >> 16) & 0xFFFF;
+    uint32_t c_size2 = (d2 & 0x3F);
+    uint32_t c_size = c_size1 | (c_size2 << 16);
+
+    card->blockCount = (c_size + 1) << 10;
+    printStr("\n\t\tBlock count 0x");
+    print32(card->blockCount);
+
+    card->capacity = (uint64_t)card->blockCount * read_bl_len;
+    printStr("\n\t\tCapacity 0x");
+    print64(card->capacity);
+
+    printChar('\n');
+    return 1;
+}
+
+// Get the Card-Specific data, SD.pdf page 181, section 5.3
+static int sd_get_csd(SD_T* sd, sdcard_info* card)
+{
+    uint32_t arg = card->rca << 16;
+
+    // Send CMD9, response is R6, 148bits
+    if (!sd_transfer_command(sd, SD_CMD_REG_RESP_RCV | SD_CMD_REG_LONG_RESP | SD_CMD_REG_CHK_RESP_CRC | 9, arg))
+    {
+        printStr("(CMD9 fail)");
+        
+        return 0;
+    }
+
+    // CSD_STRUCTURE bits
+    uint32_t d0 = sd->SD_RESP0_REG; // 0-31
+    uint32_t d1 = sd->SD_RESP1_REG; // 32-63
+    uint32_t d2 = sd->SD_RESP2_REG; // 64-95
+    uint32_t d3 = sd->SD_RESP3_REG; // 96-127
+
+    print32(d0);
+    printChar(' ');
+    print32(d1);
+    printChar(' ');
+    print32(d2);
+    printChar(' ');
+    print32(d3);
+    printChar('\n');
+
+    // Process CSD
+    if ((d0 & 1) != 1)
+    {
+        printStr("\t\tUnexpected CSD format\n");
+        return 0;
+    }
+
+    uint8_t csdVersion = (d3 >> 30) & 3;
+    printStr("\t\tCSD version ");
+    printDec8(csdVersion);
+
+    switch (csdVersion)
+    {
+        case 1:
+            return decode_csd_v2(card, d0, d1, d2, d3);
+        case 0:
+            printStr("\t\tCSD v1 not implemented!\n");
+            return 0;
+        default:
+            printStr("\t\tUnknown CSD version\n");
+            return 0;
+    }
+    
+    return 0;
+}
+
+static int sd_select_card(SD_T* sd, sdcard_info* card)
+{
+    uint32_t arg = card->rca << 16;
+
+    // Send CMD7, response is R1b
+    if (!sd_transfer_command(sd, SD_CMD_REG_RESP_RCV | SD_CMD_REG_CHK_RESP_CRC | 7, arg))
+    {
+        printStr("(CMD7 fail)");
+        
+        return 0;
+    }
+
+    return 1;
+}
+
+static int sd_set_block_length(SD_T* sd, uint32_t blockLength)
+{
+    // Send CMD16
+    if (!sd_transfer_command(sd, SD_CMD_REG_RESP_RCV | SD_CMD_REG_CHK_RESP_CRC | 16, blockLength))
+    {
+        printStr("(CMD16 fail)");
+        
+        return 0;
+    }
+
+    return 1;
+}
+
+static int sd_get_scr(SD_T* sd, sdcard_info* card)
+{
+    sd->SD_GCTL_REG |= SD_GCTL_REG_FIFO_AC_MOD; // Enable AHB bus data access
+
+    // Send CMD55 with RCA
+    if (!sd_start_app_cmd(sd, card->rca))
     {
         printStr("(CMD55 fail)");
         return 0;
     }
 
-    for (int acmd41Tries = 0; acmd41Tries < 100; acmd41Tries++)
+    if (!sd_transfer_command(sd, SD_CMD_REG_DATA_TRANS | SD_CMD_REG_WAIT_PRE_OVER | SD_CMD_REG_RESP_RCV | 51, 0))
     {
-        // Send ACMD41 - Operating conditions
-        uint32_t acmd41Arg = (1 << 30); // HCS = 1 (high capacity support)
-        if (!sd_transfer_command(sd, SD_CMD_REG_RESP_RCV | 41, acmd41Arg))
+        printStr("(ACMD51 fail)\n");
+        return 0;
+    }
+
+    sd->SD_RISR_REG = 0xFFFFFFFF;
+
+    // Rec data
+    uint32_t data[2] = {0};
+    uint8_t dataIndex = 0;
+
+    uint32_t status;
+    uint32_t irq;
+
+    // Read the two bytes of the structure
+    volatile uint32_t popFifo;
+    do
+    {
+        status = sd->SD_STAR_REG;
+        irq = (sd->SD_RISR_REG & SD_RISR_REG_ERROR_MASK) & (~SD_RISR_REG_DATA_CRC_ERROR);
+
+        if (irq)
         {
-            printStr("(ACMD41 fail)");
+            printStr("Data recv error ");
+            print32(irq);
+            printChar('\n');
+
             return 0;
         }
 
-        uint32_t ocr = sd->SD_RESP0_REG;
-        if (!(ocr & OCR_BUSY))
+        if (!(status & SD_STAR_FIFO_EMPTY))
         {
-            print32(ocr);
+            if (dataIndex < 2)
+            {
+                data[dataIndex] = sd->SD_FIFO_REG;
+            }
+            else
+            {
+                popFifo = sd->SD_FIFO_REG;
+            }
 
-            return 1;
+            dataIndex += 1;
         }
+    } while (dataIndex < 128);
 
-        // Wait a bit before the next ACMD41
-        sdelay(1000);
+    if (!(sd->SD_STAR_REG & SD_STAR_FIFO_EMPTY))
+    {
+        printStr("(FIFO not empty!)");
     }
 
-    return 0;
+    // Make sure the transfer completes
+    do
+    {
+        irq = sd->SD_RISR_REG;
+        uint32_t err = (irq & SD_RISR_REG_ERROR_MASK) & (~SD_RISR_REG_DATA_CRC_ERROR);
+        if (err)
+        {
+            printStr("Transfer complete error ");
+            print32(irq);
+            printChar('\n');
+
+            return 0;
+        }
+
+        if (irq & SD_RISR_REG_DATA_TRANSFER_COMPLETE)
+        {
+            break;
+        }
+    }
+    while(true);
+
+    // Clear IRQs
+    sd->SD_RISR_REG = 0xFFFFFFFF;
+
+    // Process SCR
+    printStr(" raw ");
+    print32(data[0]);
+    printChar(' ');
+    print32(data[1]);
+    printChar('\n');
+
+    return 1;
 }
 
 // Continues SD card detection assuming the card is V2.0 or later
 static int detect_sd_v2(SD_T* sd, sdcard_info* card)
 {
-    card->version = SD_VERSION_2;
-
+    printStr("\tAssuming SD V2\n");
     printStr("\tSending operating conditions ");
-    if (!sd_send_operating_conditions(sd))
+    if (!sd_send_operating_conditions(sd, card))
     {
         printStr("fail\n");
-
         return 0;
     }
     printStr("OK\n");
+
+    printStr("\tGet card identification ");
+    if (!sd_get_cid(sd, card))
+    {
+        printStr("fail\n");
+        return 0;
+    }
+    printStr("OK\n");
+
+    printStr("\tGet card RCA ");
+    if (!sd_get_rca(sd, card))
+    {
+        printStr("fail\n");
+        return 0;
+    }
+    printStr("OK\n");
+
+    printStr("\tGet card info ");
+    if (!sd_get_csd(sd, card))
+    {
+        printStr("fail\n");
+        return 0;
+    }
+
+    printStr("\tSelect card ");
+    if (!sd_select_card(sd, card))
+    {
+        printStr("fail\n");
+        return 0;
+    }
+    printStr("OK\n");
+
+    printStr("\tGet SCR ");
+    if (!sd_get_scr(sd, card))
+    {
+        printStr("fail\n");
+        return 0;
+    }
+    printStr("OK\n");
+
+    // Standard capacity card?
+    if (!(card->flags & SD_FLAG_CCS))
+    {
+        sd->SD_BKSR_REG = 512;
+
+        printStr("\tSet block length to 512 bytes ");
+        if (!sd_set_block_length(sd, 512))
+        {
+            printStr("fail\n");
+            return 0;
+        }
+        printStr("OK\n");
+    }
+
+    // Switch clock & bus width if possible
+
+    return 1;
 }
 
 // Tries to detect the SD/MMC card, the type, the size and everything else
@@ -309,7 +688,6 @@ static int detect_sd(uint32_t sdBase, sdcard_info* card)
     gpio_init(GPIOF, PIN1 | PIN2 | PIN3, GPIO_MODE_AF2, GPIO_PULL_NONE, GPIO_DRV_3);
 
     SD_T* sd = (SD_T*)sdBase;
-
     // Reset controller
     printStr("Reset SD controller ");
     sd_reset_full(sd);
@@ -317,7 +695,7 @@ static int detect_sd(uint32_t sdBase, sdcard_info* card)
 
     // Set clock
     printStr("Setting clock ");
-    if (!sd_set_controller_clock(sd, 400000)) // In the identification phase it is advised to use 100-400kHz clocks
+    if (!sd_set_controller_clock(sd, 400000)) // In the identification phase it is advised to use 100k-400kHz clocks
     {
         printStr("Failed to set clock!\n");
         return 0;
@@ -332,12 +710,15 @@ static int detect_sd(uint32_t sdBase, sdcard_info* card)
     // Clear all interrupts
     sd->SD_RISR_REG = 0xFFFFFFFF;
 
+    // Wait a bit for the card
+    sdelay(1000000);
+
     // Do the SD card identification process
     // SD.pdf page 48
     printStr("Card identification...\n");
     {
         // Go IDLE - CMD0
-        printStr("\tGo idle ");
+        printStr("\tReset card ");
         if (!sd_go_idle(sd))
         {
             printStr("fail\n");
@@ -347,24 +728,27 @@ static int detect_sd(uint32_t sdBase, sdcard_info* card)
 
         // CMD8
         printStr("\tSend interface params ");
-        if (!sd_send_interface_conditions(sd))
+        if (!sd_send_interface_conditions(sd, card))
         {
-            // If CMD8 is an illegal command it should be a V1.X SD card, however I have no way of testing this so...
-
             printStr("fail\n");
             return 0;
         }
         printStr("OK\n");
 
-        // Detect V2 card
-        printStr("\tV2 card detected\n");
-        if (!detect_sd_v2(sd, card))
+        switch (card->version)
         {
-            return 0;
+            case SD_VERSION_SD_V1:
+                printStr("SD V1 not supported");
+                return 0;
+            case SD_VERSION_SD_V2:
+                return detect_sd_v2(sd, card);
+            default:
+                printStr("Unknown SD version");
+                return 0;
         }
     }
 
-    return 1;
+    return 0;
 }
 
 int main(void)
@@ -372,9 +756,18 @@ int main(void)
     system_init();
     arm32_interrupt_enable(); // Enable interrupts
 
+    // Wait for input
+    printStr("Wait for input\n");
+    while (uart_get_rx_fifo_level(UART1) == 0)
+    {
+    }
+
     sdcard_info card = 
     {
         .version = SD_VERSION_UNKNOWN,
+        .flags = 0,
+        .rca = 0,
+        .capacity = 0,
     };
     if (detect_sd(SDC0_BASE, &card))
     {
@@ -391,3 +784,56 @@ int main(void)
 
     return 0;
 }
+
+/*#include <stdint.h>
+#include "io.h"
+#include <math.h>
+#include <string.h>
+#include "system.h"
+#include "arm32.h"
+#include "f1c100s_uart.h"
+#include "f1c100s_gpio.h"
+#include "f1c100s_clock.h"
+#include "f1c100s_de.h"
+#include "f1c100s_timer.h"
+#include "f1c100s_intc.h"
+#include "print.h"
+#include "sd_other.h"
+#include "f1c100s_sdc.h"
+
+static sdcard_t sdcard;
+
+int main(void)
+{
+    system_init();
+    arm32_interrupt_enable();
+
+    printStr("RESET\n");
+
+    clk_reset_set(CCU_BUS_SOFT_RST0, 8);
+    clk_enable(CCU_BUS_CLK_GATE0, 8);
+    clk_reset_clear(CCU_BUS_SOFT_RST0, 8);
+
+    gpio_init(GPIOF, PIN1 | PIN2 | PIN3, GPIO_MODE_AF2, GPIO_PULL_NONE, GPIO_DRV_3);
+
+    printStr("Detect\n");
+
+    sdcard.sdc_base = SDC0_BASE;
+    sdcard.voltage = MMC_VDD_27_36;
+    sdcard.width = MMC_BUS_WIDTH_1;
+    sdcard.clock = 50000000;
+
+    if (sdcard_detect(&sdcard) == 1)
+    {
+        printStr("OK\n");
+        print32(sdcard.read_bl_len);
+    }
+    else
+    {
+        printStr("FAIL\n");
+    }
+
+    while (1)
+    {
+    }
+}*/
