@@ -18,11 +18,24 @@
 
 #define PACKED __attribute__((packed))
 
+#define SWAP_BYTES32(U32) ( \
+    (((U32) & 0xff000000) >> 24) | \
+    (((U32) & 0x00ff0000) >>  8) | \
+    (((U32) & 0x0000ff00) <<  8) | \
+    (((U32) & 0x000000ff) << 24) \
+)
+
 #define SD_VERSION_UNKNOWN (0)
 #define SD_VERSION_SD_V1 (1)
+#define SD_VERSION_SD_V1_1 (2)
 #define SD_VERSION_SD_V2 (2)
+#define SD_VERSION_SD_V3 (3)
+#define SD_VERSION_SD_V4 (4)
+#define SD_VERSION_SD_V5 (5)
+#define SD_VERSION_SD_V6 (6)
 
 #define SD_FLAG_CCS (1 << 0) // Card capacity flag, it means a high capacity card
+#define SD_FLAG_BUS4 (1 << 1) // Card supports 4 bit bus
 
 typedef struct 
 {
@@ -168,7 +181,6 @@ static void sd_reset_full(SD_T* sd)
 static int sd_set_controller_clock(SD_T* sd, uint32_t hz)
 {
     uint32_t sdBase = (uint32_t)sd;
-
     switch (sdBase)
     {
         case SDC0_BASE:
@@ -513,7 +525,8 @@ static int sd_set_block_length(SD_T* sd, uint32_t blockLength)
 
 static int sd_get_scr(SD_T* sd, sdcard_info* card)
 {
-    sd->SD_GCTL_REG |= SD_GCTL_REG_FIFO_AC_MOD; // Enable AHB bus data access
+    sd->SD_GCTL_REG |= SD_GCTL_REG_FIFO_AC_MOD; // Enable AHB bus data access   
+    sd->SD_RISR_REG = 0xFFFFFFFF; // Clear all IRQs
 
     // Send CMD55 with RCA
     if (!sd_start_app_cmd(sd, card->rca))
@@ -528,8 +541,6 @@ static int sd_get_scr(SD_T* sd, sdcard_info* card)
         return 0;
     }
 
-    sd->SD_RISR_REG = 0xFFFFFFFF;
-
     // Rec data
     uint32_t data[2] = {0};
     uint8_t dataIndex = 0;
@@ -542,9 +553,10 @@ static int sd_get_scr(SD_T* sd, sdcard_info* card)
     do
     {
         status = sd->SD_STAR_REG;
-        irq = (sd->SD_RISR_REG & SD_RISR_REG_ERROR_MASK) & (~SD_RISR_REG_DATA_CRC_ERROR);
+        irq = sd->SD_RISR_REG;
 
-        if (irq)
+        uint32_t error = (irq & SD_RISR_REG_ERROR_MASK) & (~SD_RISR_REG_DATA_CRC_ERROR); // Ignore CRC errors
+        if (error)
         {
             printStr("Data recv error ");
             print32(irq);
@@ -553,56 +565,141 @@ static int sd_get_scr(SD_T* sd, sdcard_info* card)
             return 0;
         }
 
-        if (!(status & SD_STAR_FIFO_EMPTY))
+        int fifoEmpty = status & SD_STAR_FIFO_EMPTY;
+        if (fifoEmpty && (irq & SD_RISR_REG_DATA_TRANSFER_COMPLETE))
         {
+            break;
+        }
+
+        if (!fifoEmpty)
+        {
+            popFifo = sd->SD_FIFO_REG;
             if (dataIndex < 2)
             {
-                data[dataIndex] = sd->SD_FIFO_REG;
-            }
-            else
-            {
-                popFifo = sd->SD_FIFO_REG;
+                data[dataIndex] = popFifo;
             }
 
             dataIndex += 1;
         }
-    } while (dataIndex < 128);
+    } while (true);
 
     if (!(sd->SD_STAR_REG & SD_STAR_FIFO_EMPTY))
     {
         printStr("(FIFO not empty!)");
     }
 
-    // Make sure the transfer completes
-    do
-    {
-        irq = sd->SD_RISR_REG;
-        uint32_t err = (irq & SD_RISR_REG_ERROR_MASK) & (~SD_RISR_REG_DATA_CRC_ERROR);
-        if (err)
-        {
-            printStr("Transfer complete error ");
-            print32(irq);
-            printChar('\n');
-
-            return 0;
-        }
-
-        if (irq & SD_RISR_REG_DATA_TRANSFER_COMPLETE)
-        {
-            break;
-        }
-    }
-    while(true);
-
     // Clear IRQs
     sd->SD_RISR_REG = 0xFFFFFFFF;
 
     // Process SCR
-    printStr(" raw ");
-    print32(data[0]);
+    uint32_t scr = SWAP_BYTES32(data[0]);
+    printStr("0x");
+    print32(scr);
     printChar(' ');
-    print32(data[1]);
-    printChar('\n');
+
+    uint8_t scr_structure = (scr >> 28) & 0x0F;
+    uint8_t sd_spec = (scr >> 24) & 0x0F;
+    uint8_t data_after_erase = (scr >> 23) & 1;
+    uint8_t sd_security = (scr >> 21) & 7;
+    uint8_t sd_bus_widths = (scr >> 16) & 0x0f;
+    uint8_t sd_spec3 = (scr >> 15) & 1;
+    uint8_t ex_security = (scr >> 11) & 0x0f;
+    uint8_t sd_spec4 = (scr >> 10) & 1;
+    uint8_t sd_specx = (scr >> 6) & 0x0f;
+
+    if (scr_structure != 0)
+    {
+        printStr("(Invalid SCR version ");
+        printDec8(scr_structure);
+        printChar(')');
+        return 0;
+    }
+
+    if (sd_spec == 0 && sd_spec3 == 0 && sd_spec4 == 0 && sd_specx == 0)
+    {
+        card->version = SD_VERSION_SD_V1;
+    }
+    else if (sd_spec == 1 && sd_spec3 == 0 && sd_spec4 == 0 && sd_specx == 0)
+    {
+        card->version = SD_VERSION_SD_V1_1;
+    }
+    else if (sd_spec == 2 && sd_spec3 == 0 && sd_spec4 == 0 && sd_specx == 0)
+    {
+        card->version = SD_VERSION_SD_V2;
+    }
+    else if (sd_spec == 2 && sd_spec3 == 1 && sd_spec4 == 0 && sd_specx == 0)
+    {
+        card->version = SD_VERSION_SD_V3;
+    }
+    else if (sd_spec == 2 && sd_spec3 == 1 && sd_spec4 == 1 && sd_specx == 0)
+    {
+        card->version = SD_VERSION_SD_V4;
+    }
+    else if (sd_spec == 2 && sd_spec3 == 1 && sd_specx == 1)
+    {
+        card->version = SD_VERSION_SD_V5;
+    }
+    else if (sd_spec == 2 && sd_spec3 == 1 && sd_specx == 2)
+    {
+        card->version = SD_VERSION_SD_V6;
+    }
+    else
+    {
+        printStr("(Unknown SD version ");
+        printDec8(sd_spec);
+        printChar(',');
+        printDec8(sd_spec3);
+        printChar(',');
+        printDec8(sd_spec4);
+        printChar(',');
+        printDec8(sd_specx);
+        printChar(')');
+
+        return 0;
+    }
+
+    printStr("(SD ver ");
+    printDec16(card->version);
+    printChar(')');
+
+    if (!(sd_bus_widths & 1))
+    {
+        printStr("(BUS1 mode not supported - invalid card)");
+        return 0;
+    }
+
+    if (sd_bus_widths & 4)
+    {
+        card->flags |= SD_FLAG_BUS4;
+        printStr("(BUS4 supported)");
+    }
+
+    return 1;
+}
+
+// Switch card between 1 bit and 4 bit bus
+static int sd_set_bus_width(SD_T* sd, sdcard_info* card, int bus4)
+{
+    // Send CMD55 with RCA
+    if (!sd_start_app_cmd(sd, card->rca))
+    {
+        printStr("(CMD55 fail)");
+        return 0;
+    }
+
+    uint32_t resp = sd->SD_RESP0_REG;
+
+    uint32_t arg = (bus4 ? 2 : 0);
+    if (!sd_transfer_command(sd, SD_CMD_REG_RESP_RCV | 6, arg))
+    {
+        printStr("(ACMD6 fail)\n");
+        return 0;
+    }
+
+    resp = sd->SD_RESP0_REG;
+    
+    printStr("0x");
+    print32(resp);
 
     return 1;
 }
@@ -672,13 +769,44 @@ static int detect_sd_v2(SD_T* sd, sdcard_info* card)
         printStr("OK\n");
     }
 
-    // Switch clock & bus width if possible
+    // Switch clock
+    // NOTE: sd.pdf page 33, section 3.9 says that UHS-I cards in 3.3V signaling can go up to 50MHz
+    if (card->version >= SD_VERSION_SD_V2)
+    {
+        printStr("\tSetting clock to 50MHz ");
+        if (!sd_set_controller_clock(sd, 50000000))
+        {
+            printStr("Failed to set controller clock!\n");
+            return 0;
+        }
+        printStr("OK\n");
+    }
+
+    // Switch bus width
+    if (card->flags & SD_FLAG_BUS4)
+    {
+        printStr("\tSwitching bus width to 4bit ");
+        if (!sd_set_bus_width(sd, card, true))
+        {
+            printStr("fail\n");
+        }
+        sd->SD_BWDR_REG = SD_BWDR_REG_4; // Tell the controller to use 4bits as well
+        printStr("OK\n");
+    }
+
+    printStr("\tGet SCR ");
+    if (!sd_get_scr(sd, card))
+    {
+        printStr("fail\n");
+        return 0;
+    }
+    printStr("OK\n");
 
     return 1;
 }
 
 // Tries to detect the SD/MMC card, the type, the size and everything else
-static int detect_sd(uint32_t sdBase, sdcard_info* card)
+static int detect_sd(SD_T* sd, sdcard_info* card)
 {
     printStr("SD reset & io setup\n");
     clk_reset_set(CCU_BUS_SOFT_RST0, 8);
@@ -687,7 +815,6 @@ static int detect_sd(uint32_t sdBase, sdcard_info* card)
 
     gpio_init(GPIOF, PIN1 | PIN2 | PIN3, GPIO_MODE_AF2, GPIO_PULL_NONE, GPIO_DRV_3);
 
-    SD_T* sd = (SD_T*)sdBase;
     // Reset controller
     printStr("Reset SD controller ");
     sd_reset_full(sd);
@@ -751,6 +878,90 @@ static int detect_sd(uint32_t sdBase, sdcard_info* card)
     return 0;
 }
 
+static int sd_read_data(SD_T* sd, sdcard_info* card, uint8_t* buffer, uint64_t address, uint64_t byteCount)
+{
+    if (address % card->blockLength != 0)
+    {
+        printStr("(Unaligned read!)");
+        return 0;
+    }
+
+    sd->SD_GCTL_REG |= SD_GCTL_REG_FIFO_AC_MOD; // Enable AHB bus data access
+
+    // Clear all IRQs
+    sd->SD_RISR_REG = 0xFFFFFFFF;
+
+    if (!sd_transfer_command(sd, SD_CMD_REG_DATA_TRANS | SD_CMD_REG_WAIT_PRE_OVER | SD_CMD_REG_CHK_RESP_CRC | SD_CMD_REG_RESP_RCV | 17, address))
+    {
+        printStr("(CMD17 fail)\n");
+        return 0;
+    }
+
+     // Rec data
+    uint32_t data[128] = {0}; // 512 bytes of data
+    uint8_t dataIndex = 0;
+
+    uint32_t status;
+    uint32_t irq;
+
+    // Receive bytes
+    volatile uint32_t popFifo;
+    do
+    {
+        status = sd->SD_STAR_REG;
+        irq = sd->SD_RISR_REG;
+
+        uint32_t error = (irq & SD_RISR_REG_ERROR_MASK) & (~SD_RISR_REG_DATA_CRC_ERROR); // Ignore CRC errors
+        if (error)
+        {
+            printStr("Data recv error ");
+            print32(irq);
+            printChar('\n');
+
+            return 0;
+        }
+
+        int fifoEmpty = status & SD_STAR_FIFO_EMPTY;
+        if (fifoEmpty && (irq & SD_RISR_REG_DATA_TRANSFER_COMPLETE))
+        {
+            break;
+        }
+
+        if (!fifoEmpty)
+        {
+            popFifo = sd->SD_FIFO_REG;
+            if (dataIndex < 128)
+            {
+                data[dataIndex] = popFifo;
+            }
+
+            dataIndex += 1;
+        }
+    } while (true);
+
+    if (!(sd->SD_STAR_REG & SD_STAR_FIFO_EMPTY))
+    {
+        printStr("(FIFO not empty!)");
+    }
+
+    // Clear IRQs
+    sd->SD_RISR_REG = 0xFFFFFFFF;
+
+    printStr("Got data \n");
+    for (int x = 0; x < 128; x++)
+    {
+        print32(data[x]);
+        printChar(' ');
+
+        if ((x + 1) % 8 == 0)
+        {
+            printChar('\n');
+        }
+    }
+
+    return 1;
+}
+
 int main(void)
 {
     system_init();
@@ -761,6 +972,9 @@ int main(void)
     while (uart_get_rx_fifo_level(UART1) == 0)
     {
     }
+    uart_get_rx(UART1);
+
+    SD_T* sd = (SD_T*)SDC0_BASE;
 
     sdcard_info card = 
     {
@@ -769,9 +983,30 @@ int main(void)
         .rca = 0,
         .capacity = 0,
     };
-    if (detect_sd(SDC0_BASE, &card))
+    if (detect_sd(sd, &card))
     {
         printStr("SD card detected\n");
+
+        uint8_t sector[512] = {0};
+        uint64_t index = 0;
+        while (true)
+        {
+            printStr("Read sector at 0x");
+            print64(index);
+            printChar('\n');
+            if (!sd_read_data(sd, &card, sector, index, 512))
+            {
+                printStr("Sector read fail\n");
+            }
+
+            while (uart_get_rx_fifo_level(UART1) == 0)
+            {
+                // Wait for keypress
+            }
+            uart_get_rx(UART1);
+
+            index += card.blockLength;
+        }
     }
     else
     {
