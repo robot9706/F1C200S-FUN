@@ -1,5 +1,6 @@
 #include "print.h"
 #include "f1c100s_uart.h"
+#include <stdarg.h>
 
 #define OUT_UART UART1
 
@@ -38,7 +39,7 @@ static void printDec(uint32_t val, uint32_t div)
 
 void printStr(const char* str)
 {
-    for (char *ptr = str; *ptr != 0; ptr++)
+    for (char *ptr = (char*)str; *ptr != 0; ptr++)
     {
         char c = *ptr;
 
@@ -111,4 +112,76 @@ void printDec8(uint8_t u8)
 void printDec16(uint16_t u8)
 {
     printDec(u8, 10000);
+}
+
+// Prints the format string using the following parameters:
+// %x[1/2/4/8] Hexadecimal 1, 2, 4, 8 bytes
+// %d[1/2] Decimal 1, 2 bytes
+void printf(const char* fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+
+    while (*fmt != 0)
+    {
+        if (*fmt == '%' && *(fmt + 1) != 0 && *(fmt + 2) != 0)
+        {
+            switch (*(fmt + 1))
+            {
+                case '%':
+                    printChar('%');
+                    break;
+
+                case 'x': // Hexadecimal
+                {
+                    switch (*(fmt + 2))
+                    {
+                        case '1':
+                            int b1 = va_arg(args, int);
+                            print8(b1);
+                            break;
+                        case '2':
+                            int b2 = va_arg(args, int);
+                            print16(b2);
+                            break;
+                        case '4':
+                            long int b4 = va_arg(args, long int);
+                            print32(b4);
+                            break;
+                        case '8':
+                            long long int b8 = va_arg(args, long long int);
+                            print64(b8);
+                            break;
+                    }
+
+                    break;
+                }
+
+                case 'd': // Decimal
+                {
+                    switch (*(fmt + 2))
+                    {
+                        case '1':
+                            int d1 = va_arg(args, int);
+                            printDec8(d1);
+                            break;
+                        case '2':
+                            int d2 = va_arg(args, int);
+                            printDec16(d2);
+                            break;
+                    }
+                }
+            }
+
+            fmt += 2;
+        }
+        else
+        {
+            printChar(*fmt);
+        }
+
+        fmt++;
+    }
+
+    va_end(args);
 }

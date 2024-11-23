@@ -11,6 +11,7 @@
 #include "f1c100s_timer.h"
 #include "f1c100s_intc.h"
 #include "print.h"
+#include <stdarg.h>
 
 #define __I volatile const
 #define __O volatile
@@ -167,6 +168,16 @@ typedef struct
 #define OCR_CCS (1 << 30) // 0 = SDSD, 1 = SDHC/SDXC
 #define OCR_VDD_MASK (0xFF8000) // 2.7 - 3.6V in 100mV steps
 
+#define SD_TRY(strAction, sdFuncCall) { \
+    printStr(strAction);                \
+    if (!(sdFuncCall))                  \
+    {                                   \
+        printStr("fail\n");             \
+        return 0;                       \
+    }                                   \
+    printStr("OK\n");                   \
+}
+
 // Resets the SD controller (FIFO, DMA) and enables the debounce on card detect
 static void sd_reset_full(SD_T* sd)
 {
@@ -214,7 +225,8 @@ static int sd_set_controller_clock(SD_T* sd, uint32_t hz)
 }
 
 // Transfers a command to the SD card
-static int sd_transfer_command(SD_T* sd, uint32_t commandRegister, uint32_t argument)
+#define SD_OK (0)
+static uint32_t sd_transfer_command(SD_T* sd, uint32_t commandRegister, uint32_t argument)
 {
     sd->SD_CAGR_REG = argument;
     sd->SD_CMDR_REG = SD_CMD_REG_CMD_LOAD | commandRegister;
@@ -236,21 +248,19 @@ static int sd_transfer_command(SD_T* sd, uint32_t commandRegister, uint32_t argu
 
     if (irq & SD_RISR_REG_COMMAND_COMPLETE)
     {
-        return 1;
+        return SD_OK;
     }
 
     uint32_t error = irq & SD_RISR_REG_ERROR_MASK;
-    printStr("(error ");
-    print32(error);
-    printChar(')');
+    printf("(error %x4)", error);
 
-    return 0;
+    return error;
 }
 
 // Resets the card usind CMD0
 static int sd_go_idle(SD_T* sd)
 {
-    return sd_transfer_command(sd, SD_CMD_REG_SENT_INIT_SEQ, 0);
+    return sd_transfer_command(sd, SD_CMD_REG_SENT_INIT_SEQ, 0) == SD_OK;
 }
 
 // Sends the interface conditions to the SD card
@@ -260,11 +270,17 @@ static int sd_send_interface_conditions(SD_T* sd, sdcard_info* card)
     uint8_t checkPattern = 0xAA;
     uint32_t argument = (1 << 8) | checkPattern; // 2.7-3.6V, 0xAA = pattern check
 
-    if (!sd_transfer_command(sd, SD_CMD_REG_CHK_RESP_CRC | SD_CMD_REG_RESP_RCV | 8, argument))
+    uint32_t cmd8Result;
+    if ((cmd8Result = sd_transfer_command(sd, SD_CMD_REG_CHK_RESP_CRC | SD_CMD_REG_RESP_RCV | 8, argument)) != SD_OK)
     {
-        // TODO: Check illegal command flag
-        printStr("(CMD8 fail -> probably V1)");
+        if (cmd8Result & SD_RISR_REG_RESPONSE_TIMEOUT)
+        {
+            // Probably no card
+            printStr("(CMD8 fail -> no card?)");
+            return 0;
+        }
 
+        printStr("(CMD8 fail -> probably V1)");
         card->version = SD_VERSION_SD_V1;
 
         return 1;
@@ -296,7 +312,7 @@ static int sd_start_app_cmd(SD_T* sd, uint16_t rca)
     uint32_t arg = rca << 16;
 
     // Send CMD55 because the next command is an app specific command
-    if (!sd_transfer_command(sd, SD_CMD_REG_CHK_RESP_CRC | SD_CMD_REG_RESP_RCV | 55, arg))
+    if (sd_transfer_command(sd, SD_CMD_REG_CHK_RESP_CRC | SD_CMD_REG_RESP_RCV | 55, arg) != SD_OK)
     {
         printStr("(CMD55 fail)\n");
         return 0;
@@ -305,9 +321,7 @@ static int sd_start_app_cmd(SD_T* sd, uint16_t rca)
     uint8_t cardStatus = sd->SD_RESP0_REG;
     if (!(cardStatus & CARDSTATUS_APPCMD))
     {
-        printStr("(APPCMD status fail ");
-        print32(cardStatus);
-        printStr(")\n");
+        printf("(APPCMD status fail %x4)\n", cardStatus);
         return 0;
     }
 
@@ -330,7 +344,7 @@ static int sd_send_operating_conditions(SD_T* sd, sdcard_info* card)
         }
 
         uint32_t acmd41Arg = 0x50000000 | voltageWindow; // HCS + XPC + voltage window
-        if (!sd_transfer_command(sd, SD_CMD_REG_RESP_RCV | 41, acmd41Arg))
+        if (sd_transfer_command(sd, SD_CMD_REG_RESP_RCV | 41, acmd41Arg) != SD_OK)
         {
             printStr("(ACMD41 fail)\n");
             return 0;
@@ -354,7 +368,7 @@ static int sd_send_operating_conditions(SD_T* sd, sdcard_info* card)
     if (ocr & OCR_CCS)
     {
         card->flags |= SD_FLAG_CCS;
-        printStr("(HC/XC)");
+        printStr("(HC/XC) ");
     }
 
     return 1;
@@ -363,7 +377,7 @@ static int sd_send_operating_conditions(SD_T* sd, sdcard_info* card)
 static int sd_get_cid(SD_T* sd, sdcard_info* card)
 {
     // Send CMD2, response is R2 which is 136bits
-    if (!sd_transfer_command(sd, SD_CMD_REG_RESP_RCV | SD_CMD_REG_LONG_RESP | SD_CMD_REG_CHK_RESP_CRC | 2, 0))
+    if (sd_transfer_command(sd, SD_CMD_REG_RESP_RCV | SD_CMD_REG_LONG_RESP | SD_CMD_REG_CHK_RESP_CRC | 2, 0) != SD_OK)
     {
         printStr("(CMD2 fail)");
         
@@ -375,14 +389,7 @@ static int sd_get_cid(SD_T* sd, sdcard_info* card)
     uint32_t cid2 = sd->SD_RESP2_REG;
     uint32_t cid3 = sd->SD_RESP3_REG;
 
-    print32(cid0);
-    printChar(' ');
-    print32(cid1);
-    printChar(' ');
-    print32(cid2);
-    printChar(' ');
-    print32(cid3);
-    printChar(' ');
+    printf("%x4 %x4 %x4 %x4 ", cid0, cid1, cid2, cid3);
 
     // Whatever, SD.pdf page 180, section 5.12
 
@@ -393,7 +400,7 @@ static int sd_get_cid(SD_T* sd, sdcard_info* card)
 static int sd_get_rca(SD_T* sd, sdcard_info* card)
 {
     // Send CMD3, response is R6
-    if (!sd_transfer_command(sd, SD_CMD_REG_RESP_RCV | SD_CMD_REG_CHK_RESP_CRC | 3, 0))
+    if (sd_transfer_command(sd, SD_CMD_REG_RESP_RCV | SD_CMD_REG_CHK_RESP_CRC | 3, 0) != SD_OK)
     {
         printStr("(CMD3 fail)");
         
@@ -403,9 +410,7 @@ static int sd_get_rca(SD_T* sd, sdcard_info* card)
     uint32_t resp = sd->SD_RESP0_REG;
     card->rca = (resp >> 16) & 0xFFFF;
 
-    printStr("(RCA ");
-    printDec16(card->rca);
-    printChar(')');
+    printf("(RCA %d2)", card->rca);
 
     return 1;
 }
@@ -414,8 +419,7 @@ static int decode_csd_v2(sdcard_info* card, uint32_t d0, uint32_t d1, uint32_t d
 {
     // SD.pdf page 182, section 5.3.2
     uint16_t read_bl_len = 1 << ((d2 >> 16) & 0x0F);
-    printStr("\n\t\tRead block length ");
-    printDec16(read_bl_len);
+    printf("\n\t\tRead block length %d2", read_bl_len);
     if (read_bl_len != 512)
     {
         // CSD v2 only support 512 block sizes
@@ -430,14 +434,11 @@ static int decode_csd_v2(sdcard_info* card, uint32_t d0, uint32_t d1, uint32_t d
     uint32_t c_size = c_size1 | (c_size2 << 16);
 
     card->blockCount = (c_size + 1) << 10;
-    printStr("\n\t\tBlock count 0x");
-    print32(card->blockCount);
+    printf("\n\t\tBlock count 0x%x4", card->blockCount);
 
     card->capacity = (uint64_t)card->blockCount * read_bl_len;
-    printStr("\n\t\tCapacity 0x");
-    print64(card->capacity);
+    printf("\n\t\tCapacity 0x%x8", card->capacity);
 
-    printChar('\n');
     return 1;
 }
 
@@ -447,7 +448,7 @@ static int sd_get_csd(SD_T* sd, sdcard_info* card)
     uint32_t arg = card->rca << 16;
 
     // Send CMD9, response is R6, 148bits
-    if (!sd_transfer_command(sd, SD_CMD_REG_RESP_RCV | SD_CMD_REG_LONG_RESP | SD_CMD_REG_CHK_RESP_CRC | 9, arg))
+    if (sd_transfer_command(sd, SD_CMD_REG_RESP_RCV | SD_CMD_REG_LONG_RESP | SD_CMD_REG_CHK_RESP_CRC | 9, arg) != SD_OK)
     {
         printStr("(CMD9 fail)");
         
@@ -460,14 +461,7 @@ static int sd_get_csd(SD_T* sd, sdcard_info* card)
     uint32_t d2 = sd->SD_RESP2_REG; // 64-95
     uint32_t d3 = sd->SD_RESP3_REG; // 96-127
 
-    print32(d0);
-    printChar(' ');
-    print32(d1);
-    printChar(' ');
-    print32(d2);
-    printChar(' ');
-    print32(d3);
-    printChar('\n');
+    printf("%x4 %x4 %x4 %x4\n", d0, d1, d2, d3);
 
     // Process CSD
     if ((d0 & 1) != 1)
@@ -477,8 +471,7 @@ static int sd_get_csd(SD_T* sd, sdcard_info* card)
     }
 
     uint8_t csdVersion = (d3 >> 30) & 3;
-    printStr("\t\tCSD version ");
-    printDec8(csdVersion);
+    printf("\t\tCSD version %d1", csdVersion);
 
     switch (csdVersion)
     {
@@ -500,7 +493,7 @@ static int sd_select_card(SD_T* sd, sdcard_info* card)
     uint32_t arg = card->rca << 16;
 
     // Send CMD7, response is R1b
-    if (!sd_transfer_command(sd, SD_CMD_REG_RESP_RCV | SD_CMD_REG_CHK_RESP_CRC | 7, arg))
+    if (sd_transfer_command(sd, SD_CMD_REG_RESP_RCV | SD_CMD_REG_CHK_RESP_CRC | 7, arg) != SD_OK)
     {
         printStr("(CMD7 fail)");
         
@@ -513,7 +506,7 @@ static int sd_select_card(SD_T* sd, sdcard_info* card)
 static int sd_set_block_length(SD_T* sd, uint32_t blockLength)
 {
     // Send CMD16
-    if (!sd_transfer_command(sd, SD_CMD_REG_RESP_RCV | SD_CMD_REG_CHK_RESP_CRC | 16, blockLength))
+    if (sd_transfer_command(sd, SD_CMD_REG_RESP_RCV | SD_CMD_REG_CHK_RESP_CRC | 16, blockLength) != SD_OK)
     {
         printStr("(CMD16 fail)");
         
@@ -535,7 +528,7 @@ static int sd_get_scr(SD_T* sd, sdcard_info* card)
         return 0;
     }
 
-    if (!sd_transfer_command(sd, SD_CMD_REG_DATA_TRANS | SD_CMD_REG_WAIT_PRE_OVER | SD_CMD_REG_RESP_RCV | 51, 0))
+    if (sd_transfer_command(sd, SD_CMD_REG_DATA_TRANS | SD_CMD_REG_WAIT_PRE_OVER | SD_CMD_REG_RESP_RCV | 51, 0) != SD_OK)
     {
         printStr("(ACMD51 fail)\n");
         return 0;
@@ -558,10 +551,7 @@ static int sd_get_scr(SD_T* sd, sdcard_info* card)
         uint32_t error = (irq & SD_RISR_REG_ERROR_MASK) & (~SD_RISR_REG_DATA_CRC_ERROR); // Ignore CRC errors
         if (error)
         {
-            printStr("Data recv error ");
-            print32(irq);
-            printChar('\n');
-
+            printf("Data recv error %x4\n", irq);
             return 0;
         }
 
@@ -593,9 +583,7 @@ static int sd_get_scr(SD_T* sd, sdcard_info* card)
 
     // Process SCR
     uint32_t scr = SWAP_BYTES32(data[0]);
-    printStr("0x");
-    print32(scr);
-    printChar(' ');
+    printf("0x%x4 ", scr);
 
     uint8_t scr_structure = (scr >> 28) & 0x0F;
     uint8_t sd_spec = (scr >> 24) & 0x0F;
@@ -609,9 +597,7 @@ static int sd_get_scr(SD_T* sd, sdcard_info* card)
 
     if (scr_structure != 0)
     {
-        printStr("(Invalid SCR version ");
-        printDec8(scr_structure);
-        printChar(')');
+        printf("(Invalid SCR version %d1)", scr_structure);
         return 0;
     }
 
@@ -645,23 +631,11 @@ static int sd_get_scr(SD_T* sd, sdcard_info* card)
     }
     else
     {
-        printStr("(Unknown SD version ");
-        printDec8(sd_spec);
-        printChar(',');
-        printDec8(sd_spec3);
-        printChar(',');
-        printDec8(sd_spec4);
-        printChar(',');
-        printDec8(sd_specx);
-        printChar(')');
-
+        printf("(Unknown SD version %d1, %d1, %d1, %d1)", sd_spec, sd_spec3, sd_spec4, sd_specx);
         return 0;
     }
 
-    printStr("(SD ver ");
-    printDec16(card->version);
-    printChar(')');
-
+    printf("(SD ver %d2)", card->version);
     if (!(sd_bus_widths & 1))
     {
         printStr("(BUS1 mode not supported - invalid card)");
@@ -683,23 +657,22 @@ static int sd_set_bus_width(SD_T* sd, sdcard_info* card, int bus4)
     // Send CMD55 with RCA
     if (!sd_start_app_cmd(sd, card->rca))
     {
-        printStr("(CMD55 fail)");
+        printStr("(CMD55 fail) ");
         return 0;
     }
 
     uint32_t resp = sd->SD_RESP0_REG;
 
     uint32_t arg = (bus4 ? 2 : 0);
-    if (!sd_transfer_command(sd, SD_CMD_REG_RESP_RCV | 6, arg))
+    if (sd_transfer_command(sd, SD_CMD_REG_RESP_RCV | 6, arg) != SD_OK)
     {
-        printStr("(ACMD6 fail)\n");
+        printStr("(ACMD6 fail) ");
         return 0;
     }
 
     resp = sd->SD_RESP0_REG;
     
-    printStr("0x");
-    print32(resp);
+    printf("0x%x4 ", resp);
 
     return 1;
 }
@@ -708,99 +681,37 @@ static int sd_set_bus_width(SD_T* sd, sdcard_info* card, int bus4)
 static int detect_sd_v2(SD_T* sd, sdcard_info* card)
 {
     printStr("\tAssuming SD V2\n");
-    printStr("\tSending operating conditions ");
-    if (!sd_send_operating_conditions(sd, card))
-    {
-        printStr("fail\n");
-        return 0;
-    }
-    printStr("OK\n");
 
-    printStr("\tGet card identification ");
-    if (!sd_get_cid(sd, card))
-    {
-        printStr("fail\n");
-        return 0;
-    }
-    printStr("OK\n");
-
-    printStr("\tGet card RCA ");
-    if (!sd_get_rca(sd, card))
-    {
-        printStr("fail\n");
-        return 0;
-    }
-    printStr("OK\n");
-
-    printStr("\tGet card info ");
-    if (!sd_get_csd(sd, card))
-    {
-        printStr("fail\n");
-        return 0;
-    }
-
-    printStr("\tSelect card ");
-    if (!sd_select_card(sd, card))
-    {
-        printStr("fail\n");
-        return 0;
-    }
-    printStr("OK\n");
-
-    printStr("\tGet SCR ");
-    if (!sd_get_scr(sd, card))
-    {
-        printStr("fail\n");
-        return 0;
-    }
-    printStr("OK\n");
+    SD_TRY("\tSending operating conditions ", sd_send_operating_conditions(sd, card));
+    SD_TRY("\tGet card identification ", sd_get_cid(sd, card));
+    SD_TRY("\tGet card RCA ", sd_get_rca(sd, card));
+    SD_TRY("\tGet card info ", sd_get_csd(sd, card));
+    SD_TRY("\tSelect card ", sd_select_card(sd, card));
+    SD_TRY("\tGet SCR ", sd_get_scr(sd, card));
 
     // Standard capacity card?
     if (!(card->flags & SD_FLAG_CCS))
     {
         sd->SD_BKSR_REG = 512;
 
-        printStr("\tSet block length to 512 bytes ");
-        if (!sd_set_block_length(sd, 512))
-        {
-            printStr("fail\n");
-            return 0;
-        }
-        printStr("OK\n");
+        SD_TRY("\tSet block length to 512 bytes ", sd_set_block_length(sd, 512));
     }
 
     // Switch clock
     // NOTE: sd.pdf page 33, section 3.9 says that UHS-I cards in 3.3V signaling can go up to 50MHz
     if (card->version >= SD_VERSION_SD_V2)
     {
-        printStr("\tSetting clock to 50MHz ");
-        if (!sd_set_controller_clock(sd, 50000000))
-        {
-            printStr("Failed to set controller clock!\n");
-            return 0;
-        }
-        printStr("OK\n");
+        SD_TRY("\tSetting clock to 50MHz ", sd_set_controller_clock(sd, 50000000));
     }
 
     // Switch bus width
     if (card->flags & SD_FLAG_BUS4)
     {
-        printStr("\tSwitching bus width to 4bit ");
-        if (!sd_set_bus_width(sd, card, true))
-        {
-            printStr("fail\n");
-        }
+        SD_TRY("\tSwitching bus width to 4bit ", sd_set_bus_width(sd, card, true));
         sd->SD_BWDR_REG = SD_BWDR_REG_4; // Tell the controller to use 4bits as well
-        printStr("OK\n");
-    }
 
-    printStr("\tGet SCR ");
-    if (!sd_get_scr(sd, card))
-    {
-        printStr("fail\n");
-        return 0;
+        sdelay(1000000); // Sometimes the first data transfer after the bus width change fails
     }
-    printStr("OK\n");
 
     return 1;
 }
@@ -821,13 +732,7 @@ static int detect_sd(SD_T* sd, sdcard_info* card)
     printStr("OK\n");
 
     // Set clock
-    printStr("Setting clock ");
-    if (!sd_set_controller_clock(sd, 400000)) // In the identification phase it is advised to use 100k-400kHz clocks
-    {
-        printStr("Failed to set clock!\n");
-        return 0;
-    }
-    printStr("OK\n");
+    SD_TRY("Setting clock ", sd_set_controller_clock(sd, 400000)); // In the identification phase it is advised to use 100k-400kHz clocks
 
     // Set bus width
     printStr("Set bus width ");
@@ -845,22 +750,10 @@ static int detect_sd(SD_T* sd, sdcard_info* card)
     printStr("Card identification...\n");
     {
         // Go IDLE - CMD0
-        printStr("\tReset card ");
-        if (!sd_go_idle(sd))
-        {
-            printStr("fail\n");
-            return 0;
-        }
-        printStr("OK\n");
+        SD_TRY("\tReset card ", sd_go_idle(sd));
 
-        // CMD8
-        printStr("\tSend interface params ");
-        if (!sd_send_interface_conditions(sd, card))
-        {
-            printStr("fail\n");
-            return 0;
-        }
-        printStr("OK\n");
+        // CMD8 - interface conditions
+        SD_TRY("\tSend interface params ", sd_send_interface_conditions(sd, card));
 
         switch (card->version)
         {
@@ -891,7 +784,7 @@ static int sd_read_data(SD_T* sd, sdcard_info* card, uint8_t* buffer, uint64_t a
     // Clear all IRQs
     sd->SD_RISR_REG = 0xFFFFFFFF;
 
-    if (!sd_transfer_command(sd, SD_CMD_REG_DATA_TRANS | SD_CMD_REG_WAIT_PRE_OVER | SD_CMD_REG_CHK_RESP_CRC | SD_CMD_REG_RESP_RCV | 17, address))
+    if (sd_transfer_command(sd, SD_CMD_REG_DATA_TRANS | SD_CMD_REG_WAIT_PRE_OVER | SD_CMD_REG_CHK_RESP_CRC | SD_CMD_REG_RESP_RCV | 17, address) != SD_OK)
     {
         printStr("(CMD17 fail)\n");
         return 0;
@@ -914,10 +807,7 @@ static int sd_read_data(SD_T* sd, sdcard_info* card, uint8_t* buffer, uint64_t a
         uint32_t error = (irq & SD_RISR_REG_ERROR_MASK) & (~SD_RISR_REG_DATA_CRC_ERROR); // Ignore CRC errors
         if (error)
         {
-            printStr("Data recv error ");
-            print32(irq);
-            printChar('\n');
-
+            printf("Data recv error %x4\n", irq);
             return 0;
         }
 
@@ -991,9 +881,7 @@ int main(void)
         uint64_t index = 0;
         while (true)
         {
-            printStr("Read sector at 0x");
-            print64(index);
-            printChar('\n');
+            printf("Read sector at 0x%x8\n", index);
             if (!sd_read_data(sd, &card, sector, index, 512))
             {
                 printStr("Sector read fail\n");
@@ -1019,56 +907,3 @@ int main(void)
 
     return 0;
 }
-
-/*#include <stdint.h>
-#include "io.h"
-#include <math.h>
-#include <string.h>
-#include "system.h"
-#include "arm32.h"
-#include "f1c100s_uart.h"
-#include "f1c100s_gpio.h"
-#include "f1c100s_clock.h"
-#include "f1c100s_de.h"
-#include "f1c100s_timer.h"
-#include "f1c100s_intc.h"
-#include "print.h"
-#include "sd_other.h"
-#include "f1c100s_sdc.h"
-
-static sdcard_t sdcard;
-
-int main(void)
-{
-    system_init();
-    arm32_interrupt_enable();
-
-    printStr("RESET\n");
-
-    clk_reset_set(CCU_BUS_SOFT_RST0, 8);
-    clk_enable(CCU_BUS_CLK_GATE0, 8);
-    clk_reset_clear(CCU_BUS_SOFT_RST0, 8);
-
-    gpio_init(GPIOF, PIN1 | PIN2 | PIN3, GPIO_MODE_AF2, GPIO_PULL_NONE, GPIO_DRV_3);
-
-    printStr("Detect\n");
-
-    sdcard.sdc_base = SDC0_BASE;
-    sdcard.voltage = MMC_VDD_27_36;
-    sdcard.width = MMC_BUS_WIDTH_1;
-    sdcard.clock = 50000000;
-
-    if (sdcard_detect(&sdcard) == 1)
-    {
-        printStr("OK\n");
-        print32(sdcard.read_bl_len);
-    }
-    else
-    {
-        printStr("FAIL\n");
-    }
-
-    while (1)
-    {
-    }
-}*/
