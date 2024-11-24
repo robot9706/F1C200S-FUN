@@ -18,6 +18,7 @@ build:
             - "-I$(PROJECTROOT)/f1c100s/arm926/inc"
             - "-I$(PROJECTROOT)/f1c100s/drivers/inc"
             - "-I$(PROJECTROOT)/src"
+            - "-I$(PROJECTROOT)/src/ff"
         - DEFS:
             - "-D__ARM32_ARCH__=5"
             - "-D__ARM926EJS__"
@@ -82,6 +83,7 @@ build:
                   in:
                     - "$(PROJECTROOT)/f1c100s/drivers/src/*.c"
                     - "$(PROJECTROOT)/src/*.c"
+                    - "$(PROJECTROOT)/src/ff/*.c"
                   out: $(OBJFOLDER)
                 - name: "Link ELF"
                   tool: CC
