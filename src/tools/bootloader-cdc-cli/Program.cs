@@ -1,7 +1,11 @@
-﻿using System.Diagnostics;
+﻿using System.Collections;
+using System.ComponentModel.DataAnnotations;
+using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
+using System.Formats.Tar;
 using System.IO.Ports;
+using System.Net;
 using System.Net.Sockets;
-using System.Runtime.InteropServices.Marshalling;
 using System.Text;
 
 namespace CLI
@@ -23,6 +27,7 @@ namespace CLI
         public abstract int Read(byte[] buffer, int offset, int count);
         public abstract void Flush();
         public abstract void Close();
+        public abstract void SendReset();
     }
 
     class ComPort : PortLike
@@ -33,6 +38,7 @@ namespace CLI
         { 
             _com = new SerialPort(com, baud);
             _com.Open();
+            _com.DtrEnable = false;
         }
 
         public override int Read(byte[] buffer, int offset, int count)
@@ -53,6 +59,13 @@ namespace CLI
         public override void Flush()
         {
             _com.BaseStream.Flush();
+        }
+
+        public override void SendReset()
+        {
+            _com.DtrEnable = true;
+            Thread.Sleep(250);
+            _com.DtrEnable = false;
         }
     }
 
@@ -85,6 +98,232 @@ namespace CLI
         {
             _client.GetStream().Flush();
         }
+
+        public override void SendReset()
+        {
+            throw new NotSupportedException();
+        }
+    }
+
+    class PortTCPMultiplexer : PortLike
+    {
+        private bool _running;
+
+        private PortLike _source;
+
+        private TcpListener _listener;
+
+        private ByteQueue _readBuffer;
+
+        private object _tcpLock;
+        private List<Stream> _tcpStreams;
+
+        private ManualResetEventSlim _waitClient;
+
+        public PortTCPMultiplexer(PortLike source, int port)
+        {
+            _running = true;
+
+            _source = source;
+
+            _tcpLock = new object();
+            _tcpStreams = new List<Stream>();
+
+            _waitClient = new ManualResetEventSlim(false);
+
+            _readBuffer = new ByteQueue(1024);
+
+            _listener = new TcpListener(IPAddress.Parse("127.0.0.1"), port);
+            _listener.Start();
+
+            Console.WriteLine($"[TCP] Listening on 127.0.0.1:{port}");
+
+            StartReader();
+            StartAcceptClient();
+        }
+
+        public override void Close()
+        {
+            _running = false;
+
+            _listener.Stop();
+
+            if (_source != null)
+            {
+                _source.Close();
+                _source = null;
+            }
+        }
+
+        public override void Flush()
+        {
+            _readBuffer.Clear();
+
+            if (_source == null)
+            {
+                throw new Exception();
+            }
+
+            _source.Flush();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (_source == null)
+            {
+                throw new Exception();
+            }
+
+            int ret;
+            lock (_readBuffer)
+            {
+                ret = _readBuffer.Dequeue(buffer, offset, count);
+            }
+
+            return ret;
+        }
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            if (_source == null)
+            {
+                throw new Exception();
+            }
+
+            _source.Write(buffer, offset, count);
+        }
+
+        public override void SendReset()
+        {
+            if (_source == null)
+            {
+                throw new Exception();
+            }
+
+            _source.SendReset();
+        }
+
+        private void StartAcceptClient()
+        {
+            _listener.BeginAcceptTcpClient(OnAcceptClient, null);
+        }
+
+        private void OnAcceptClient(IAsyncResult result)
+        {
+            if (!_running)
+            {
+                return;
+            }
+
+            TcpListener listener = (TcpListener)result.AsyncState;
+            TcpClient client = _listener.EndAcceptTcpClient(result);
+
+            StartAcceptClient(); // Accept next client
+
+            NetworkStream tcpStream = client.GetStream();
+            lock (_tcpLock)
+            {
+                _tcpStreams.Add(tcpStream);
+
+                _waitClient.Set();
+            }
+
+            string remote = client.Client.RemoteEndPoint.ToString();
+            Console.WriteLine($"[TCP] Client connected from {remote}");
+
+            NetworkStream stream = client.GetStream();
+            byte[] buffer = new byte[1024];
+            while (client.Client != null && client.Client.Connected)
+            {
+                try
+                {
+                    IAsyncResult readAsync = stream.BeginRead(buffer, 0, buffer.Length, null, null);
+                    result.AsyncWaitHandle.WaitOne();
+                    int readCount = stream.EndRead(readAsync);
+
+                    if (_source == null)
+                    {
+                        break;
+                    }
+                    else
+                    {
+                        _source.Write(buffer, 0, readCount);
+                    }
+                }
+                catch (IOException ioex)
+                {
+                    break;
+                }
+            }
+
+            try
+            {
+                client.Close();
+            }
+            catch
+            { }
+
+            Console.WriteLine($"[TCP] Client disconnected from {remote}");
+
+            lock (_tcpLock)
+            {
+                _tcpStreams.Remove(tcpStream);
+
+                if (_tcpStreams.Count <= 0)
+                {
+                    _waitClient.Reset();
+                }
+            }
+        }
+
+        public void WaitForClient()
+        {
+            _waitClient.Wait();
+        }
+
+        private void StartReader()
+        {
+            Task.Factory.StartNew(() =>
+            {
+                try
+                {
+                    byte[] buffer = new byte[1024];
+                    while (_running)
+                    {
+                        int ret = _source.Read(buffer, 0, buffer.Length);
+                        if (ret <= 0)
+                        {
+                            continue;
+                        }
+
+                        lock (_readBuffer)
+                        {
+                            _readBuffer.Enqueue(buffer, 0, ret);
+                        }
+
+                        lock (_tcpLock)
+                        {
+                            foreach (var tcpStream in _tcpStreams)
+                            {
+                                try
+                                {
+                                    tcpStream.Write(buffer, 0, ret);
+                                }
+                                catch (Exception ex) { }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Port failed '{ex.Message}'");
+                }
+                finally
+                {
+                    _source = null;
+                }
+            }, TaskCreationOptions.LongRunning);
+        }
     }
 
     internal class Program
@@ -92,31 +331,35 @@ namespace CLI
         static int PORT_TIMEOUT_MS = 5000;
         static int UBOOT_PROMPT_TIMEOUT = 10000;
 
-        enum ActionEnum
+        public enum ResetMode
         {
-            UBootFatLoad,
-            LoadCDC
-        }
-
-        class LoaderAction
-        {
-            public ActionEnum Action;
-
-            public List<string> Params = new List<string>();
-        }
-
-        public enum LoopMode
-        {
-            None,
-            Manual,
-            UBoot,
+            None, // Program exits afte completes the boot process
+            Manual, // Program waits for user input then resets the port and loops
+            UBoot, // Program waits for UBoot string and loops
         }
 
         class Args
         {
-            public LoopMode Loop = LoopMode.None;
+            [Required]
+            public ResetMode ResetMode = ResetMode.None;
 
-            public List<LoaderAction> Actions;
+            [Required]
+            public string UBootPort; // Port where UBoot CLI is accessible
+
+            [AllowNull]
+            public string[] UBootFatloadCommand; // UBoot fatload command parameters
+
+            [AllowNull]
+            public int? UBootPortServePort = null; // UBoot port TCP server port
+
+            [AllowNull]
+            public bool UBootPortServeWait = false; // Wait for a connection before continuing
+
+            [AllowNull]
+            public string BL2Port; // Bootloader second stage port
+
+            [AllowNull]
+            public string BL2LoadFile; // File to load using BL2
         }
 
         static void Main(string[] strArgs)
@@ -125,29 +368,38 @@ namespace CLI
             {
                 var args = ParseArguments(strArgs);
 
-                if (args.Actions.Count == 0)
+                Console.Write("Waiting for UBoot port...");
+                PortLike ubootPort = WaitForPort(args.UBootPort, PORT_TIMEOUT_MS);
+                Console.WriteLine("Connected");
+
+                if (args.UBootPortServePort.HasValue)
                 {
-                    throw new Exception("No actions provided");
+                    ubootPort = new PortTCPMultiplexer(ubootPort, args.UBootPortServePort.Value);
+
+                    if (args.UBootPortServeWait)
+                    {
+                        Console.WriteLine("Waiting for a TCP client to connect...");
+                        ((PortTCPMultiplexer)ubootPort).WaitForClient();
+                    }
                 }
 
-                while (args.Loop != LoopMode.None)
+                while (args.ResetMode != ResetMode.None)
                 {
-                    foreach (var action in args.Actions)
+                    if (ExecuteUBootFatLoad(ubootPort, args.UBootFatloadCommand, args.ResetMode))
                     {
-                        switch (action.Action)
+                        if (!string.IsNullOrEmpty(args.BL2Port) && !string.IsNullOrEmpty(args.BL2LoadFile))
                         {
-                            case ActionEnum.UBootFatLoad:
-                                ExecuteUBootFatLoad(action.Params, args);
-                                break;
-                            case ActionEnum.LoadCDC:
-                                ExecuteCDCLoad(action.Params);
-                                break;
+                            ExecuteCDCLoad(args.BL2Port, args.BL2LoadFile);
                         }
+
+                        Console.WriteLine("Done");
+                    }
+                    else
+                    {
+                        Console.WriteLine("UBoot failed");
                     }
 
-                    Console.WriteLine("Done");
-
-                    if (args.Loop == LoopMode.Manual)
+                    if (args.ResetMode == ResetMode.Manual)
                     {
                         Console.WriteLine("Press ENTER to restart");
 
@@ -169,73 +421,142 @@ namespace CLI
             }
         }
 
+        private static string[] ConsumeArguments(Stack<string> args)
+        {
+            // Consumes arguments until a new command (starting with -- is found)
+            List<string> parts = new List<string>();
+
+            while (args.Count > 0)
+            {
+                string arg = args.Peek();
+                if (arg.StartsWith("--"))
+                {
+                    break;
+                }
+
+                args.Pop();
+
+                parts.Add(arg);
+            }
+
+            return parts.ToArray();
+        }
+
+        private static ResetMode MapResetMode(string mode)
+        {
+            switch (mode)
+            {
+                case "manual":
+                    return ResetMode.Manual;
+                case "on-uboot":
+                    return ResetMode.UBoot;
+                case "none":
+                    return ResetMode.None;
+            }
+
+            throw new Exception($"Unknown reset mode '{mode}'");
+        }
+
         private static Args ParseArguments(string[] args)
         {
             var ret = new Args();
 
             Array.Reverse(args);
             Stack<string> argsStack = new Stack<string>(args);
-            ret.Actions = new List<LoaderAction>();
 
-            LoaderAction currentAction = null;
             while (argsStack.Count > 0)
             {
                 string currentArg = argsStack.Pop();
-
-                if (currentArg.StartsWith("--"))
+                if (!currentArg.StartsWith("--"))
                 {
-                    if (currentAction != null)
-                    {
-                        ret.Actions.Add(currentAction);
-                        currentAction = null;
-                    }
+                    throw new Exception($"Invalid argument '{currentArg}'");
+                }
 
-                    switch (currentArg.Substring(2))
-                    {
-                        case "loop":
-                            if (argsStack.Peek().StartsWith("--"))
+                string[] argParams = ConsumeArguments(argsStack);
+
+                switch (currentArg.Substring(2))
+                {
+                    case "reset":
+                        if (argParams.Length != 1)
+                        {
+                            throw new Exception("--reset expects one parameter");
+                        }
+
+                        string mode = argParams[0];
+
+                        ret.ResetMode = MapResetMode(mode);
+                        break;
+
+                    case "uboot-port":
+                        if (argParams.Length != 1)
+                        {
+                            throw new Exception("--uboot-port expects one parameter");
+                        }
+
+                        ret.UBootPort = argParams[0];
+                        break;
+
+                    case "uboot-port-serve":
+                        if (argParams.Length < 1 || argParams.Length > 2)
+                        {
+                            throw new Exception("--uboot-port-serve expects a TCP port");
+                        }
+
+                        int port;
+                        if (!Int32.TryParse(argParams[0], out port))
+                        {
+                            throw new Exception($"Invalid TCP port '{argParams[0]}'");
+                        }
+
+                        ret.UBootPortServePort = port;
+
+                        if (argParams.Length == 2)
+                        {
+                            if (argParams[1] == "wait")
                             {
-                                ret.Loop = LoopMode.Manual;
+                                ret.UBootPortServeWait = true;
                             }
                             else
                             {
-                                string modeString = argsStack.Pop();
-                                if (modeString == "on-uboot")
-                                {
-                                    ret.Loop = LoopMode.UBoot;
-                                }
-                                else
-                                {
-                                    throw new Exception($"Unknown loop mode '{modeString}'");
-                                }
+                                throw new Exception("Unknown extra arg for --uboot-port-serve [port] {wait}");
                             }
-                            break;
+                        }
+                        break;
 
-                        case "uboot-fatload":
-                            currentAction = new LoaderAction();
-                            currentAction.Action = ActionEnum.UBootFatLoad;
-                            break;
-                        case "cdc":
-                            currentAction = new LoaderAction();
-                            currentAction.Action = ActionEnum.LoadCDC;
-                            break;
-                        default:
-                            throw new Exception($"Unknown action: '{currentArg.Substring(2)}'");
-                    }
-                }
-                else if (currentAction == null)
-                {
-                    throw new Exception($"Invalid argument '{currentArg}', expected action");
-                }
-                else
-                {
-                    currentAction.Params.Add(currentArg);
+                    case "uboot-fatload":
+                        if (argParams.Length != 3)
+                        {
+                            throw new Exception("--uboot-fatload expects 3 parameters");
+                        }
+
+                        ret.UBootFatloadCommand = argParams;
+                        break;
+
+                    case "bl2":
+                        if (argParams.Length != 2)
+                        {
+                            throw new Exception("--bl2 expects the BL2 CDC port and the file to load");
+                        }
+
+                        ret.BL2Port = argParams[0];
+                        ret.BL2LoadFile = argParams[1];
+                        break;
+
+                    default:
+                        throw new Exception($"Unknown argument: '{currentArg.Substring(2)}'");
                 }
             }
 
-            if (currentAction != null)
+            List<ValidationResult> validation = new List<ValidationResult>();
+            if (!Validator.TryValidateObject(ret, new ValidationContext(ret), validation))
             {
-                ret.Actions.Add(currentAction);
+                Console.WriteLine("Error in following options:");
+                foreach (var err in validation)
+                {
+                    Console.WriteLine($"{String.Join(",", err.MemberNames)}: {err.ErrorMessage}");
+                }
+
+                throw new Exception("Invalid options");
             }
 
             return ret;
@@ -345,45 +666,38 @@ namespace CLI
             return false;
         }
 
-        private static void ExecuteUBootFatLoad(List<string> args, Args cliArgs)
+        private static bool ExecuteUBootFatLoad(PortLike ubootPort, string[] fatload, ResetMode resetMode)
         {
-            if (args.Count != 4)
-            {
-                throw new Exception("Invalid args");
-            }
-
             byte[] ubootPrompt = new byte[] { (byte)'=', (byte)'>' };
             byte[] ubootHeader = new byte[] { (byte)'U', (byte)'-', (byte)'B', (byte)'o', (byte)'o', (byte)'t' };
 
             byte[] buffer = new byte[128];
             int bufferPointer = 0;
 
-            string port = args[0];
-
-            string ubootDisk = args[1];
-            string ubootDiskPart = args[2];
-            string ubootDiskFile = args[3];
+            string ubootDisk = fatload[0];
+            string ubootDiskPart = fatload[1];
+            string ubootDiskFile = fatload[2];
 
             string command = $"fatload {ubootDisk} {ubootDiskPart} 80000000 {ubootDiskFile}; go 80000000;\n";
-            Console.WriteLine($"[UBOOT] Waiting for UBoot on port '{port}'");
-
-            PortLike serial = WaitForPort(port, PORT_TIMEOUT_MS);
-            if (serial == null)
+            
+            if (resetMode == ResetMode.Manual)
             {
-                throw new Exception($"[UBOOT] Port not found '{port}'");
+                Console.WriteLine("[UBOOT] Reset");
+
+                ubootPort.SendReset();
             }
 
-            Console.WriteLine("[UBOOT] Got serial");
-
-            if (cliArgs.Loop == LoopMode.UBoot)
+            if (resetMode == ResetMode.UBoot)
             {
                 Console.WriteLine("[UBOOT] Waiting for 'U-Boot'");
+
+                ubootPort.Flush();
 
                 while (true)
                 {
                     Thread.Sleep(50);
 
-                    bufferPointer += serial.Read(buffer, bufferPointer, buffer.Length - bufferPointer);
+                    bufferPointer += ubootPort.Read(buffer, bufferPointer, buffer.Length - bufferPointer);
                     if (FindPattern(ref buffer, bufferPointer, ubootHeader))
                     {
                         break;
@@ -403,14 +717,18 @@ namespace CLI
             Array.Clear(buffer);
             bufferPointer = 0;
 
+            ubootPort.Flush();
+
+            Console.WriteLine("[UBOOT] Waiting for prompt");
+
             DateTimeOffset timeout = DateTimeOffset.UtcNow.AddMilliseconds(UBOOT_PROMPT_TIMEOUT);
             bool hasPrompt = false;
             while (DateTimeOffset.UtcNow < timeout && !hasPrompt)
             {
-                serial.Write(new byte[] { 0x0D }, 0, 1); // CR
+                ubootPort.Write(new byte[] { 0x0D }, 0, 1); // CR
                 Thread.Sleep(50);
 
-                bufferPointer += serial.Read(buffer, bufferPointer, buffer.Length - bufferPointer);
+                bufferPointer += ubootPort.Read(buffer, bufferPointer, buffer.Length - bufferPointer);
                 if (FindPattern(ref buffer, bufferPointer, ubootPrompt))
                 {
                     hasPrompt = true;
@@ -427,7 +745,8 @@ namespace CLI
 
             if (!hasPrompt)
             {
-                throw new Exception("Failed to obtain UBoot prompt");
+                Console.WriteLine("Failed to obtain UBoot prompt");
+                return false;
             }
 
             Console.WriteLine("[UBOOT] Got prompt");
@@ -435,37 +754,36 @@ namespace CLI
             Console.Write("[UBOOT] " + command);
             Console.WriteLine("[UBOOT] Done");
 
-            serial.Write(command);
-            serial.Write(new byte[] { 0x0D }, 0, 1); // Execute
-            serial.Flush();
+            ubootPort.Write(command);
+            ubootPort.Write(new byte[] { 0x0D }, 0, 1); // Execute
+            ubootPort.Flush();
 
-            serial.Close();
+            return true;
         }
 
-        private static void ExecuteCDCLoad(List<string> args)
+        private static void ExecuteCDCLoad(string cdcPort, string cdcFile)
         {
-            string portName = args[0];
-            string file = args[1];
-
-            if (!File.Exists(file))
+            if (!File.Exists(cdcFile))
             {
-                throw new Exception($"File not found: {file}");
+                Console.WriteLine($"[BL2] File not found: {cdcFile}");
+                return;
             }
 
-            Console.WriteLine($"[CDC] Waiting for serial '{portName}'");
+            Console.WriteLine($"[BL2] Waiting for serial '{cdcPort}'");
 
-            PortLike port = WaitForPort(portName, PORT_TIMEOUT_MS);
+            PortLike port = WaitForPort(cdcPort, PORT_TIMEOUT_MS);
             if (port == null) 
             {
-                throw new Exception($"[CDC] Port not found '{portName}'");
+                Console.WriteLine($"[BL2] Port not found '{cdcPort}'");
+                return;
             }
 
-            Console.Write("[CDC] Transfering file");
+            Console.Write("[BL2] Transfering file");
 
             var sw = Stopwatch.StartNew();
 
             long tx = 0;
-            using (FileStream inputFile = new FileStream(file, FileMode.Open))
+            using (FileStream inputFile = new FileStream(cdcFile, FileMode.Open))
             {
                 long fileLength = inputFile.Length;
                 if (fileLength > UInt32.MaxValue)
@@ -497,11 +815,7 @@ namespace CLI
             sw.Stop();
 
             Console.WriteLine();
-            Console.WriteLine($"[CDC] Sent {tx} bytes in {sw.ElapsedMilliseconds}ms ({(tx / sw.ElapsedMilliseconds) * 1000} bit/s)");
-
-            // Done
-            //Console.WriteLine("[CDC] Press enter to boot");
-            //Console.ReadLine();
+            Console.WriteLine($"[BL2] Sent {tx} bytes in {sw.ElapsedMilliseconds}ms ({(tx / sw.ElapsedMilliseconds) * 1000} bit/s)");
 
             // Send the EP3COMMAND_EXECUTE command
             port.Write((byte)0xB1);

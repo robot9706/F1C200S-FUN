@@ -2,7 +2,7 @@
   "profiles": {
     "CLI": {
       "commandName": "Project",
-      "commandLineArgs": "--loop on-uboot --uboot-fatload tcp:127.0.0.1:5000 mmc 0:1 loader-cdc2.bin --cdc COM22 ../../../../../bootloader-env/doom/build/doom.bin"
+      "commandLineArgs": "--reset manual --uboot-port-serve 5000 wait --uboot-port serial:COM11:115200 --uboot-fatload mmc 0:1 loader-cdc2.bin --bl2 COM12 C:\\Development\\Projects\\F1C200S-FUN\\src\\bootloader-env\\sdcard\\build\\sdcard.bin"
     }
   }
 }

@@ -117,6 +117,7 @@ void printDec16(uint16_t u8)
 // Prints the format string using the following parameters:
 // %x[1/2/4/8] Hexadecimal 1, 2, 4, 8 bytes
 // %d[1/2] Decimal 1, 2 bytes
+// %s String
 void printf(const char* fmt, ...)
 {
     va_list args;
@@ -124,17 +125,48 @@ void printf(const char* fmt, ...)
 
     while (*fmt != 0)
     {
-        if (*fmt == '%' && *(fmt + 1) != 0 && *(fmt + 2) != 0)
+        if (*fmt == '%')
         {
-            switch (*(fmt + 1))
+            char what = *(fmt + 1);
+            switch (what)
             {
-                case '%':
-                    printChar('%');
-                    break;
-
-                case 'x': // Hexadecimal
+                // END
+                case 0:
                 {
-                    switch (*(fmt + 2))
+                    fmt += 2;
+                    break;
+                }
+
+                // %%
+                case '%':
+                { 
+                    printChar('%');
+
+                    fmt += 2;
+                    break;
+                }
+
+                // String
+                case 's':
+                {
+                    char* str = va_arg(args, char*);
+                    printStr(str);
+
+                    fmt += 2;
+                    break;
+                }
+
+                // Hex
+                case 'x':
+                {
+                    char resolution = *(fmt + 2);
+                    if (resolution == 0)
+                    {
+                        fmt += 3;
+                        break;
+                    }
+
+                    switch (resolution)
                     {
                         case '1':
                             int b1 = va_arg(args, int);
@@ -154,12 +186,22 @@ void printf(const char* fmt, ...)
                             break;
                     }
 
+                    fmt += 3;
+
                     break;
                 }
 
-                case 'd': // Decimal
+                // Decimal
+                case 'd':
                 {
-                    switch (*(fmt + 2))
+                    char resolution = *(fmt + 2);
+                    if (resolution == 0)
+                    {
+                        fmt += 3;
+                        break;
+                    }
+
+                    switch (resolution)
                     {
                         case '1':
                             int d1 = va_arg(args, int);
@@ -170,17 +212,18 @@ void printf(const char* fmt, ...)
                             printDec16(d2);
                             break;
                     }
+
+                    fmt += 3;
+
+                    break;
                 }
             }
-
-            fmt += 2;
         }
         else
         {
             printChar(*fmt);
+            fmt += 1;
         }
-
-        fmt++;
     }
 
     va_end(args);
